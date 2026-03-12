@@ -68,6 +68,7 @@ export default function RootLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="leg" options={{ presentation: 'modal', headerShown: false }} />
+      <Stack.Screen name="create-trip" options={{ presentation: 'modal', headerShown: false }} />
     </Stack>
   );
 }
