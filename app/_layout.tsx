@@ -56,24 +56,18 @@ export default function RootLayout() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Redirect based on auth state once everything is ready
+  // DEV: skip auth, go straight to main
   useEffect(() => {
-    if (session === undefined || !fontsLoaded) return;
-
-    const inAuthGroup = segments[0] === '(auth)';
-
-    if (session && inAuthGroup) {
-      router.replace('/(main)/');
-    } else if (!session && !inAuthGroup) {
-      router.replace('/(auth)/');
-    }
-  }, [session, fontsLoaded, segments]);
+    if (!fontsLoaded) return;
+    if (segments[0] !== '(main)') router.replace('/(main)/');
+  }, [fontsLoaded]);
 
   // Don't render anything until fonts and session are resolved
   if (!fontsLoaded && !fontError) return null;
-  if (session === undefined) return null;
 
   return (
-    <Stack screenOptions={{ headerShown: false }} />
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="leg" options={{ presentation: 'modal', headerShown: false }} />
+    </Stack>
   );
 }

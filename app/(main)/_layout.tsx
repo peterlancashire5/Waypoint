@@ -1,6 +1,7 @@
 import { Tabs } from 'expo-router';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
+import { Feather } from '@expo/vector-icons';
 
 export default function MainLayout() {
   return (
@@ -10,7 +11,7 @@ export default function MainLayout() {
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.textMuted,
         tabBarStyle: {
-          backgroundColor: colors.surface,
+          backgroundColor: colors.white,
           borderTopColor: colors.border,
           borderTopWidth: 1,
           height: 80,
@@ -27,29 +28,32 @@ export default function MainLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Trips',
-          tabBarIcon: ({ color }) => (
-            // Placeholder — swap for an icon library component when added
-            <TabIcon label="✦" color={color} />
+          title: 'Map',
+          tabBarIcon: ({ color, size }) => (
+            <Feather name="map" size={size} color={color} />
           ),
         }}
       />
+      <Tabs.Screen
+        name="trips"
+        options={{
+          title: 'Trips',
+          tabBarIcon: ({ color, size }) => (
+            <Feather name="briefcase" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="inbox"
+        options={{
+          title: 'Inbox',
+          tabBarIcon: ({ color, size }) => (
+            <Feather name="inbox" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen name="stop" options={{ href: null }} />
+      <Tabs.Screen name="leg" options={{ href: null }} />
     </Tabs>
-  );
-}
-
-// Minimal text-based tab icon placeholder
-function TabIcon({ label, color }: { label: string; color: string }) {
-  return (
-    <>{/* eslint-disable-next-line react-native/no-inline-styles */}
-      <TabIconText label={label} color={color} />
-    </>
-  );
-}
-
-import { Text } from 'react-native';
-function TabIconText({ label, color }: { label: string; color: string }) {
-  return (
-    <Text style={{ fontSize: 20, color, lineHeight: 24 }}>{label}</Text>
   );
 }
