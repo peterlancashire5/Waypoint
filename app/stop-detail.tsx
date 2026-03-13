@@ -2,15 +2,18 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableWithoutFeedback,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -32,8 +35,6 @@ import ManualTransportSheet from '@/components/ManualTransportSheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-// ParsedBooking extended with DB row id and source table so booking-detail knows
-// where to fetch/edit/delete from.
 type SavedBookingItem = ParsedBooking & {
   _dbId: string;
   _source: 'accommodation' | 'leg_bookings' | 'saved_items';
@@ -54,12 +55,18 @@ interface StopDetail {
   } | null;
 }
 
+// Suggestion to apply accommodation dates to the stop (shown as a banner)
+interface DateSuggestion {
+  startDate: string; // YYYY-MM-DD
+  endDate: string;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-function formatDateRange(start: string | null, end: string | null): string {
-  if (!start) return '—';
+function formatDateRange(start: string | null, end: string | null): string | null {
+  if (!start) return null;
   const s = new Date(start + 'T00:00:00');
   const sStr = `${s.getDate()} ${MONTHS[s.getMonth()]}`;
   if (!end) return sStr;
@@ -71,7 +78,6 @@ function formatDateRange(start: string | null, end: string | null): string {
 }
 
 function computeNights(stop: StopDetail): number | null {
-  // Prefer calculating from dates — the stored nights column can be stale
   if (stop.start_date && stop.end_date) {
     const s = new Date(stop.start_date + 'T00:00:00');
     const e = new Date(stop.end_date + 'T00:00:00');
@@ -92,6 +98,17 @@ function shortDate(iso: string | null): string {
   if (!iso) return '—';
   const d = new Date(iso + 'T00:00:00');
   return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+}
+
+function buildHeaderMeta(stop: StopDetail): string {
+  const dateRange = formatDateRange(stop.start_date, stop.end_date);
+  const nights = computeNights(stop);
+  const parts = [
+    stop.country,
+    dateRange,
+    nights !== null ? `${nights} ${nights === 1 ? 'night' : 'nights'}` : null,
+  ].filter(Boolean);
+  return parts.join(' · ');
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -123,6 +140,268 @@ function PlaceholderTab({ label }: { label: string }) {
       <Feather name="clock" size={28} color={colors.border} />
       <Text style={styles.placeholderHeading}>{label}</Text>
       <Text style={styles.placeholderBody}>Coming soon</Text>
+    </View>
+  );
+}
+
+// ─── Stop action menu ─────────────────────────────────────────────────────────
+
+function StopActionMenu({
+  visible,
+  onEditDates,
+  onRename,
+  onDelete,
+  onClose,
+}: {
+  visible: boolean;
+  onEditDates: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal transparent visible={visible} animationType="fade" onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={onClose}>
+        <View style={styles.menuOverlay} />
+      </TouchableWithoutFeedback>
+      <View style={[styles.menuSheet, { paddingBottom: insets.bottom + 8 }]}>
+        <View style={styles.menuHandle} />
+        <Pressable
+          style={({ pressed }) => [styles.menuItem, pressed && styles.menuItemPressed]}
+          onPress={() => { onClose(); onEditDates(); }}
+        >
+          <Feather name="calendar" size={18} color={colors.text} style={styles.menuItemIcon} />
+          <Text style={styles.menuItemText}>Edit dates</Text>
+        </Pressable>
+        <View style={styles.menuDivider} />
+        <Pressable
+          style={({ pressed }) => [styles.menuItem, pressed && styles.menuItemPressed]}
+          onPress={() => { onClose(); onRename(); }}
+        >
+          <Feather name="edit-2" size={18} color={colors.text} style={styles.menuItemIcon} />
+          <Text style={styles.menuItemText}>Rename stop</Text>
+        </Pressable>
+        <View style={styles.menuDivider} />
+        <Pressable
+          style={({ pressed }) => [styles.menuItem, pressed && styles.menuItemPressed]}
+          onPress={() => { onClose(); onDelete(); }}
+        >
+          <Feather name="trash-2" size={18} color={colors.error} style={styles.menuItemIcon} />
+          <Text style={[styles.menuItemText, { color: colors.error }]}>Delete stop</Text>
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
+// ─── Edit dates sheet ─────────────────────────────────────────────────────────
+
+function EditDatesSheet({
+  visible,
+  initialStart,
+  initialEnd,
+  onSave,
+  onClose,
+}: {
+  visible: boolean;
+  initialStart: string | null;
+  initialEnd: string | null;
+  onSave: (start: string, end: string) => void;
+  onClose: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const [start, setStart] = useState(initialStart ?? '');
+  const [end, setEnd] = useState(initialEnd ?? '');
+
+  useEffect(() => {
+    if (visible) {
+      setStart(initialStart ?? '');
+      setEnd(initialEnd ?? '');
+    }
+  }, [visible]);
+
+  function handleSave() {
+    onSave(start.trim(), end.trim());
+  }
+
+  if (!visible) return null;
+
+  return (
+    <Modal transparent visible animationType="slide" onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={onClose}>
+        <View style={styles.sheetOverlay} />
+      </TouchableWithoutFeedback>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.kavWrapper}
+      >
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View style={styles.sheetHandle} />
+          <Text style={styles.sheetTitle}>Edit dates</Text>
+
+          <View style={styles.datesCard}>
+            <View style={styles.dateFieldRow}>
+              <Text style={styles.dateFieldLabel}>Start date</Text>
+              <TextInput
+                style={styles.dateFieldInput}
+                value={start}
+                onChangeText={setStart}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor={colors.border}
+                keyboardType="numbers-and-punctuation"
+                returnKeyType="next"
+              />
+            </View>
+            <View style={styles.dateDivider} />
+            <View style={styles.dateFieldRow}>
+              <Text style={styles.dateFieldLabel}>End date</Text>
+              <TextInput
+                style={styles.dateFieldInput}
+                value={end}
+                onChangeText={setEnd}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor={colors.border}
+                keyboardType="numbers-and-punctuation"
+                returnKeyType="done"
+                onSubmitEditing={handleSave}
+              />
+            </View>
+          </View>
+
+          <View style={styles.sheetActions}>
+            <Pressable
+              style={({ pressed }) => [styles.sheetCancelBtn, pressed && { opacity: 0.7 }]}
+              onPress={onClose}
+            >
+              <Text style={styles.sheetCancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.sheetSaveBtn, pressed && { opacity: 0.85 }]}
+              onPress={handleSave}
+            >
+              <Text style={styles.sheetSaveText}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ─── Rename sheet ─────────────────────────────────────────────────────────────
+
+function RenameSheet({
+  visible,
+  initialCity,
+  onSave,
+  onClose,
+}: {
+  visible: boolean;
+  initialCity: string;
+  onSave: (city: string) => void;
+  onClose: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const [city, setCity] = useState(initialCity);
+
+  useEffect(() => {
+    if (visible) setCity(initialCity);
+  }, [visible]);
+
+  function handleSave() {
+    const trimmed = city.trim();
+    if (trimmed) onSave(trimmed);
+  }
+
+  if (!visible) return null;
+
+  return (
+    <Modal transparent visible animationType="slide" onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={onClose}>
+        <View style={styles.sheetOverlay} />
+      </TouchableWithoutFeedback>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.kavWrapper}
+      >
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View style={styles.sheetHandle} />
+          <Text style={styles.sheetTitle}>Rename stop</Text>
+
+          <View style={styles.datesCard}>
+            <View style={styles.dateFieldRow}>
+              <Text style={styles.dateFieldLabel}>City</Text>
+              <TextInput
+                style={styles.dateFieldInput}
+                value={city}
+                onChangeText={setCity}
+                placeholder="City name"
+                placeholderTextColor={colors.border}
+                autoFocus
+                returnKeyType="done"
+                onSubmitEditing={handleSave}
+              />
+            </View>
+          </View>
+
+          <View style={styles.sheetActions}>
+            <Pressable
+              style={({ pressed }) => [styles.sheetCancelBtn, pressed && { opacity: 0.7 }]}
+              onPress={onClose}
+            >
+              <Text style={styles.sheetCancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.sheetSaveBtn, pressed && { opacity: 0.85 }]}
+              onPress={handleSave}
+            >
+              <Text style={styles.sheetSaveText}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ─── Date suggestion banner ───────────────────────────────────────────────────
+
+function DateSuggestionBanner({
+  city,
+  suggestion,
+  onApply,
+  onDismiss,
+}: {
+  city: string;
+  suggestion: DateSuggestion;
+  onApply: () => void;
+  onDismiss: () => void;
+}) {
+  const dateStr = formatDateRange(suggestion.startDate, suggestion.endDate);
+  return (
+    <View style={styles.suggestionBanner}>
+      <Feather name="calendar" size={14} color={colors.primary} style={{ marginTop: 1 }} />
+      <Text style={styles.suggestionText} numberOfLines={2}>
+        <Text style={styles.suggestionBold}>{city}</Text>
+        {' '}has no dates — use{' '}
+        <Text style={styles.suggestionBold}>{dateStr}</Text>
+        {' '}from this booking?
+      </Text>
+      <Pressable
+        style={({ pressed }) => [styles.suggestionApply, pressed && { opacity: 0.75 }]}
+        onPress={onApply}
+        hitSlop={8}
+      >
+        <Text style={styles.suggestionApplyText}>Apply</Text>
+      </Pressable>
+      <Pressable
+        style={({ pressed }) => [styles.suggestionDismiss, pressed && { opacity: 0.6 }]}
+        onPress={onDismiss}
+        hitSlop={8}
+      >
+        <Feather name="x" size={14} color={colors.textMuted} />
+      </Pressable>
     </View>
   );
 }
@@ -376,7 +655,6 @@ function LogisticsTab({
       contentContainerStyle={styles.logisticsContent}
       showsVerticalScrollIndicator={false}
     >
-      {/* Saved transport */}
       {transports.length > 0 && (
         <>
           <Text style={styles.logisticsSectionLabel}>Transport</Text>
@@ -386,7 +664,6 @@ function LogisticsTab({
         </>
       )}
 
-      {/* Saved accommodation */}
       {accommodations.length > 0 && (
         <>
           <Text style={[styles.logisticsSectionLabel, transports.length > 0 && styles.sectionLabelSpaced]}>
@@ -398,7 +675,6 @@ function LogisticsTab({
         </>
       )}
 
-      {/* Upload cards */}
       <Text style={[styles.logisticsSectionLabel, savedBookings.length > 0 && styles.sectionLabelSpaced]}>
         Add booking
       </Text>
@@ -440,6 +716,17 @@ export default function StopDetailScreen() {
   // Saved bookings shown in the Logistics tab
   const [savedBookings, setSavedBookings] = useState<SavedBookingItem[]>([]);
 
+  // All stops in the same trip (for the "Save to stop" dropdown)
+  const [tripStops, setTripStops] = useState<StopOption[]>([]);
+
+  // Stop action menu + edit sheets
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [editDatesVisible, setEditDatesVisible] = useState(false);
+  const [renameVisible, setRenameVisible] = useState(false);
+
+  // Suggestion banner (ephemeral — only shown after saving accommodation with dates)
+  const [dateSuggestion, setDateSuggestion] = useState<DateSuggestion | null>(null);
+
   // Transport source picker
   const [sourcePickerVisible, setSourcePickerVisible] = useState(false);
   const [manualSheetVisible, setManualSheetVisible] = useState(false);
@@ -473,7 +760,23 @@ export default function StopDetailScreen() {
       setStop(stopData);
       setLoading(false);
 
-      // Load previously saved bookings for this stop
+      // Fetch all stops in the same trip for the booking sheet dropdowns
+      const { data: allStops } = await supabase
+        .from('stops')
+        .select('id, city')
+        .eq('trip_id', stopData.trip_id)
+        .order('order_index', { ascending: true });
+
+      if (allStops) {
+        setTripStops(
+          (allStops as { id: string; city: string }[]).map((s) => ({
+            id: s.id,
+            city: s.city,
+            tripName: stopData.trips?.name ?? 'Trip',
+          }))
+        );
+      }
+
       await loadSavedBookings(stopData);
     };
     fetchAll();
@@ -498,7 +801,6 @@ export default function StopDetailScreen() {
     for (const a of accs ?? []) {
       const checkInDate: string = (a as any).check_in_date ?? '';
       const checkOutDate: string = (a as any).check_out_date ?? '';
-      // Compute nights from the booking's own dates; fall back to the stop's dates
       const nights = checkInDate && checkOutDate
         ? computeNightsFromDates(checkInDate, checkOutDate)
         : computeNights(stopData);
@@ -540,7 +842,7 @@ export default function StopDetailScreen() {
           _dbId: lb.id,
           _source: 'leg_bookings',
           type: 'transport',
-          transport_type: 'flight', // legacy leg_bookings don't store transport_type
+          transport_type: 'flight',
           operator: lb.operator ?? '',
           service_number: lb.reference ?? '',
           origin_city: leg?.from_stop?.city ?? '',
@@ -572,7 +874,7 @@ export default function StopDetailScreen() {
     for (const sf of savedTransports ?? []) {
       try {
         const parsed = JSON.parse((sf as any).note ?? '{}');
-        if (!parsed.origin_city) continue; // not our JSON format
+        if (!parsed.origin_city) continue;
         items.push({
           _dbId: (sf as any).id,
           _source: 'saved_items',
@@ -602,14 +904,78 @@ export default function StopDetailScreen() {
     setSavedBookings(items);
   }
 
-  // Reload saved bookings whenever this screen comes back into focus (e.g. after
-  // returning from booking-detail where a booking may have been deleted).
+  // Reload saved bookings on screen focus
   useFocusEffect(
     useCallback(() => {
       if (!stop) return;
       loadSavedBookings(stop);
     }, [stop]),
   );
+
+  // ── Stop management actions ───────────────────────────────────────────────
+
+  async function handleSaveDates(startDate: string, endDate: string) {
+    if (!stop) return;
+    setEditDatesVisible(false);
+
+    const { error: updateErr } = await supabase
+      .from('stops')
+      .update({ start_date: startDate || null, end_date: endDate || null })
+      .eq('id', stop.id);
+
+    if (updateErr) {
+      Alert.alert('Could not save dates', updateErr.message);
+      return;
+    }
+
+    setStop((prev) => prev ? { ...prev, start_date: startDate || null, end_date: endDate || null } : prev);
+    // If we just applied a date suggestion, clear it
+    setDateSuggestion(null);
+  }
+
+  async function handleRename(city: string) {
+    if (!stop) return;
+    setRenameVisible(false);
+
+    const { error: updateErr } = await supabase
+      .from('stops')
+      .update({ city })
+      .eq('id', stop.id);
+
+    if (updateErr) {
+      Alert.alert('Could not rename stop', updateErr.message);
+      return;
+    }
+
+    setStop((prev) => prev ? { ...prev, city } : prev);
+  }
+
+  function handleDeleteStop() {
+    if (!stop) return;
+    Alert.alert(
+      `Delete ${stop.city}?`,
+      'This will permanently delete this stop and all its data. Are you sure?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: confirmDeleteStop },
+      ],
+    );
+  }
+
+  async function confirmDeleteStop() {
+    if (!stop) return;
+    const { error: deleteErr } = await supabase.from('stops').delete().eq('id', stop.id);
+    if (deleteErr) {
+      Alert.alert('Could not delete stop', deleteErr.message);
+      return;
+    }
+    router.back();
+  }
+
+  async function handleApplyDateSuggestion() {
+    if (!stop || !dateSuggestion) return;
+    await handleSaveDates(dateSuggestion.startDate, dateSuggestion.endDate);
+  }
 
   // ── Navigate to booking detail ─────────────────────────────────────────────
 
@@ -665,8 +1031,23 @@ export default function StopDetailScreen() {
         });
         if (insertErr) throw new Error(insertErr.message);
 
+        // If the target stop has no dates but the booking does, show the suggestion banner
+        const targetIsCurrentStop = selectedStopId === stop?.id;
+        if (
+          targetIsCurrentStop &&
+          stop &&
+          !stop.start_date &&
+          !stop.end_date &&
+          booking.check_in_date &&
+          booking.check_out_date
+        ) {
+          setDateSuggestion({
+            startDate: booking.check_in_date,
+            endDate: booking.check_out_date,
+          });
+        }
+
       } else if (booking.type === 'transport') {
-        // Try to find the inbound leg for this stop
         const { data: inboundLegs } = await supabase
           .from('legs')
           .select('id')
@@ -732,7 +1113,6 @@ export default function StopDetailScreen() {
         if (siErr) throw new Error(siErr.message);
       }
 
-      // Reload from DB so the new item gets its proper _dbId
       if (stop) await loadSavedBookings(stop);
 
       setPreviewVisible(false);
@@ -782,15 +1162,7 @@ export default function StopDetailScreen() {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
-  const nights = computeNights(stop);
-  const dateRange = formatDateRange(stop.start_date, stop.end_date);
-  const metaParts = [stop.country, dateRange, nights !== null ? `${nights} nights` : null].filter(Boolean);
-
-  const stopOption: StopOption = {
-    id: stop.id,
-    city: stop.city,
-    tripName: stop.trips?.name ?? 'Trip',
-  };
+  const headerMeta = buildHeaderMeta(stop);
 
   return (
     <View style={styles.container}>
@@ -802,14 +1174,26 @@ export default function StopDetailScreen() {
           </Pressable>
           <View style={styles.headerText}>
             <Text style={styles.headerCity}>{stop.city}</Text>
-            <Text style={styles.headerMeta}>{metaParts.join(' · ')}</Text>
+            {headerMeta ? (
+              <Text style={styles.headerMeta}>{headerMeta}</Text>
+            ) : null}
           </View>
-          <Pressable style={styles.headerAction} hitSlop={8}>
+          <Pressable style={styles.headerAction} hitSlop={8} onPress={() => setMenuVisible(true)}>
             <Feather name="more-horizontal" size={22} color={colors.text} />
           </Pressable>
         </View>
         <SegmentTabs active={activeTab} onChange={setActiveTab} />
       </SafeAreaView>
+
+      {/* Date suggestion banner — ephemeral, shown after saving accommodation to a dateless stop */}
+      {dateSuggestion && (
+        <DateSuggestionBanner
+          city={stop.city}
+          suggestion={dateSuggestion}
+          onApply={handleApplyDateSuggestion}
+          onDismiss={() => setDateSuggestion(null)}
+        />
+      )}
 
       {activeTab === 'Logistics' && (
         <LogisticsTab
@@ -827,6 +1211,32 @@ export default function StopDetailScreen() {
       {activeTab === 'Days' && <PlaceholderTab label="Days" />}
       {activeTab === 'Saved' && <PlaceholderTab label="Saved" />}
 
+      {/* Stop action menu */}
+      <StopActionMenu
+        visible={menuVisible}
+        onEditDates={() => setEditDatesVisible(true)}
+        onRename={() => setRenameVisible(true)}
+        onDelete={handleDeleteStop}
+        onClose={() => setMenuVisible(false)}
+      />
+
+      {/* Edit dates sheet */}
+      <EditDatesSheet
+        visible={editDatesVisible}
+        initialStart={stop.start_date}
+        initialEnd={stop.end_date}
+        onSave={handleSaveDates}
+        onClose={() => setEditDatesVisible(false)}
+      />
+
+      {/* Rename sheet */}
+      <RenameSheet
+        visible={renameVisible}
+        initialCity={stop.city}
+        onSave={handleRename}
+        onClose={() => setRenameVisible(false)}
+      />
+
       {/* Transport source picker */}
       <TransportSourceModal
         visible={sourcePickerVisible}
@@ -838,7 +1248,7 @@ export default function StopDetailScreen() {
       {/* Manual transport entry */}
       <ManualTransportSheet
         visible={manualSheetVisible}
-        stops={[stopOption]}
+        stops={tripStops}
         saving={saving}
         onSave={handleSave}
         onDiscard={() => setManualSheetVisible(false)}
@@ -848,7 +1258,7 @@ export default function StopDetailScreen() {
       <BookingPreviewSheet
         visible={previewVisible}
         booking={parsedBooking}
-        stops={[stopOption]}
+        stops={tripStops}
         saving={saving}
         onSave={handleSave}
         onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); }}
@@ -887,6 +1297,90 @@ const styles = StyleSheet.create({
   },
   segmentLabel: { fontFamily: fonts.bodyBold, fontSize: 13, color: colors.textMuted },
   segmentLabelActive: { color: colors.primary },
+
+  // Stop action menu
+  menuOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)' },
+  menuSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingTop: 12, paddingHorizontal: 20,
+  },
+  menuHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, alignSelf: 'center', marginBottom: 12,
+  },
+  menuItem: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 16,
+  },
+  menuItemPressed: { opacity: 0.6 },
+  menuItemIcon: { marginRight: 14 },
+  menuItemText: { fontFamily: fonts.body, fontSize: 16, color: colors.text },
+  menuDivider: { height: 1, backgroundColor: colors.border },
+
+  // Edit dates / rename shared sheet
+  sheetOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)' },
+  kavWrapper: { flex: 1, justifyContent: 'flex-end' },
+  sheet: {
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingTop: 12, paddingHorizontal: 20,
+  },
+  sheetHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, alignSelf: 'center', marginBottom: 14,
+  },
+  sheetTitle: {
+    fontFamily: fonts.displayBold, fontSize: 20,
+    color: colors.text, letterSpacing: -0.2, marginBottom: 18,
+  },
+  datesCard: {
+    backgroundColor: colors.white, borderRadius: 14, marginBottom: 20,
+    borderWidth: 1, borderColor: colors.border, overflow: 'hidden',
+  },
+  dateFieldRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 14, gap: 12,
+  },
+  dateFieldLabel: {
+    fontFamily: fonts.body, fontSize: 14, color: colors.textMuted,
+    width: 100, flexShrink: 0,
+  },
+  dateFieldInput: {
+    flex: 1, fontFamily: fonts.body, fontSize: 14, color: colors.text,
+    textAlign: 'right', padding: 0,
+  },
+  dateDivider: { height: 1, backgroundColor: colors.border, marginHorizontal: 16 },
+  sheetActions: { flexDirection: 'row', gap: 12 },
+  sheetCancelBtn: {
+    flex: 1, paddingVertical: 14, borderRadius: 14,
+    borderWidth: 1.5, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sheetCancelText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.textMuted },
+  sheetSaveBtn: {
+    flex: 2, paddingVertical: 14, borderRadius: 14,
+    backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center',
+  },
+  sheetSaveText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.white },
+
+  // Date suggestion banner
+  suggestionBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#EBF3F6', paddingHorizontal: 14, paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  suggestionText: {
+    flex: 1, fontFamily: fonts.body, fontSize: 13, color: colors.text, lineHeight: 18,
+  },
+  suggestionBold: { fontFamily: fonts.bodyBold },
+  suggestionApply: {
+    paddingHorizontal: 10, paddingVertical: 5,
+    backgroundColor: colors.primary, borderRadius: 8,
+  },
+  suggestionApplyText: { fontFamily: fonts.bodyBold, fontSize: 12, color: colors.white },
+  suggestionDismiss: { padding: 4 },
 
   logisticsContent: { padding: 16, paddingBottom: 40 },
   logisticsSectionLabel: {

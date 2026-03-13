@@ -268,9 +268,40 @@ export default function HomeScreen() {
         }
 
         const dbTrip = data as DbTrip;
-        const stops = (dbTrip.stops as DbStop[])
+        let stops = (dbTrip.stops as DbStop[])
           .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))
           .map(toStop);
+
+        // Re-geocode any stops that are missing coordinates (silent fallback at create time)
+        const missing = stops.filter((s) => s.lat === null || s.lng === null);
+        if (missing.length > 0) {
+          const geocodedMap = new Map<string, { lat: number; lng: number }>();
+          await Promise.all(
+            missing.map(async (s) => {
+              try {
+                const res = await globalThis.fetch(
+                  `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(s.city)}&count=1&language=en&format=json`
+                );
+                const json = await res.json();
+                const r = json.results?.[0];
+                if (r) {
+                  geocodedMap.set(s.id, { lat: r.latitude, lng: r.longitude });
+                  supabase
+                    .from('stops')
+                    .update({ latitude: r.latitude, longitude: r.longitude })
+                    .eq('id', s.id)
+                    .then(() => {}); // fire and forget
+                }
+              } catch { /* silent */ }
+            })
+          );
+          if (geocodedMap.size > 0) {
+            stops = stops.map((s) => {
+              const g = geocodedMap.get(s.id);
+              return g ? { ...s, ...g } : s;
+            });
+          }
+        }
 
         const firstLegId = (dbTrip.legs as DbLeg[])
           .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0))[0]?.id ?? null;
@@ -346,7 +377,7 @@ export default function HomeScreen() {
   const pinnedStops = trip.stops.filter((s) => s.lat !== null && s.lng !== null);
   const polylineCoords = pinnedStops.map((s) => ({ latitude: s.lat!, longitude: s.lng! }));
   const totalNights = trip.stops.reduce((n, s) => n + s.nights, 0);
-  const firstStop = trip.stops[0];
+  const selectedStop = trip.stops.find((s) => s.id === selectedStopId) ?? null;
 
   return (
     <View style={styles.container}>
@@ -418,19 +449,16 @@ export default function HomeScreen() {
         <Pressable
           style={styles.viewTripButton}
           onPress={() => {
-            if (!firstStop) return;
-            router.push({
-              pathname: '/stop-detail',
-              params: {
-                stopId: firstStop.id,
-                city: firstStop.city,
-                country: firstStop.country,
-                dateRange: formatDateRange(firstStop.start_date, firstStop.end_date),
-              },
-            });
+            if (selectedStop) {
+              router.push({ pathname: '/stop-detail', params: { stopId: selectedStop.id } });
+            } else {
+              router.push({ pathname: '/trip-overview', params: { tripId: trip.id } });
+            }
           }}
         >
-          <Text style={styles.viewTripLabel}>View trip details</Text>
+          <Text style={styles.viewTripLabel}>
+            {selectedStop ? 'View stop details' : 'View trip details'}
+          </Text>
           <Feather name="arrow-right" size={15} color={colors.primary} />
         </Pressable>
       </Animated.View>
