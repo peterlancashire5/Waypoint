@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { Feather } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { colors } from '@/constants/colors';
@@ -20,6 +21,13 @@ import { parsePdfBooking, readUriAsBase64, type ParsedBooking, type FlightBookin
 import BookingPreviewSheet, { type StopOption } from '@/components/BookingPreviewSheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+// ParsedBooking extended with DB row id and source table so booking-detail knows
+// where to fetch/edit/delete from.
+type SavedBookingItem = ParsedBooking & {
+  _dbId: string;
+  _source: 'accommodation' | 'leg_bookings' | 'saved_items';
+};
 
 interface StopDetail {
   id: string;
@@ -53,10 +61,19 @@ function formatDateRange(start: string | null, end: string | null): string {
 }
 
 function computeNights(stop: StopDetail): number | null {
-  if (stop.nights !== null) return stop.nights;
-  if (!stop.start_date || !stop.end_date) return null;
-  const s = new Date(stop.start_date + 'T00:00:00');
-  const e = new Date(stop.end_date + 'T00:00:00');
+  // Prefer calculating from dates — the stored nights column can be stale
+  if (stop.start_date && stop.end_date) {
+    const s = new Date(stop.start_date + 'T00:00:00');
+    const e = new Date(stop.end_date + 'T00:00:00');
+    const diff = Math.round((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24));
+    return diff > 0 ? diff : null;
+  }
+  return stop.nights;
+}
+
+function computeNightsFromDates(start: string, end: string): number | null {
+  const s = new Date(start + 'T00:00:00');
+  const e = new Date(end + 'T00:00:00');
   const diff = Math.round((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24));
   return diff > 0 ? diff : null;
 }
@@ -102,9 +119,12 @@ function PlaceholderTab({ label }: { label: string }) {
 
 // ─── Saved booking cards ──────────────────────────────────────────────────────
 
-function SavedFlightCard({ booking }: { booking: FlightBooking }) {
+function SavedFlightCard({ booking, onPress }: { booking: FlightBooking; onPress: () => void }) {
   return (
-    <View style={styles.savedCard}>
+    <Pressable
+      style={({ pressed }) => [styles.savedCard, pressed && styles.savedCardPressed]}
+      onPress={onPress}
+    >
       <View style={styles.savedCardIconWrap}>
         <Feather name="send" size={16} color={colors.primary} />
       </View>
@@ -129,14 +149,17 @@ function SavedFlightCard({ booking }: { booking: FlightBooking }) {
           ].filter(Boolean).join(' · ')}
         </Text>
       </View>
-    </View>
+    </Pressable>
   );
 }
 
-function SavedAccommodationCard({ booking }: { booking: AccommodationBooking }) {
+function SavedAccommodationCard({ booking, onPress }: { booking: AccommodationBooking; onPress: () => void }) {
   const nights = booking.nights;
   return (
-    <View style={styles.savedCard}>
+    <Pressable
+      style={({ pressed }) => [styles.savedCard, pressed && styles.savedCardPressed]}
+      onPress={onPress}
+    >
       <View style={styles.savedCardIconWrap}>
         <Feather name="home" size={16} color={colors.primary} />
       </View>
@@ -151,12 +174,14 @@ function SavedAccommodationCard({ booking }: { booking: AccommodationBooking }) 
         </View>
         <Text style={styles.savedCardMeta}>
           {[
-            booking.check_in_date ? `Check-in ${shortDate(booking.check_in_date)}` : null,
+            (booking.check_in_date || booking.check_out_date)
+              ? formatDateRange(booking.check_in_date || null, booking.check_out_date || null)
+              : null,
             nights !== null ? `${nights} ${nights === 1 ? 'night' : 'nights'}` : null,
           ].filter(Boolean).join(' · ')}
         </Text>
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -242,17 +267,19 @@ function LogisticsTab({
   onDevAccommodation,
   parsingFlight,
   parsingAccommodation,
+  onBookingPress,
 }: {
-  savedBookings: ParsedBooking[];
+  savedBookings: SavedBookingItem[];
   onPickFlight: () => void;
   onPickAccommodation: () => void;
   onDevFlight: () => void;
   onDevAccommodation: () => void;
   parsingFlight: boolean;
   parsingAccommodation: boolean;
+  onBookingPress: (booking: SavedBookingItem) => void;
 }) {
-  const flights = savedBookings.filter((b): b is FlightBooking => b.type === 'flight');
-  const accommodations = savedBookings.filter((b): b is AccommodationBooking => b.type === 'accommodation');
+  const flights = savedBookings.filter((b): b is SavedBookingItem & FlightBooking => b.type === 'flight');
+  const accommodations = savedBookings.filter((b): b is SavedBookingItem & AccommodationBooking => b.type === 'accommodation');
 
   return (
     <ScrollView
@@ -265,7 +292,7 @@ function LogisticsTab({
         <>
           <Text style={styles.logisticsSectionLabel}>Flights</Text>
           {flights.map((b, i) => (
-            <SavedFlightCard key={i} booking={b} />
+            <SavedFlightCard key={i} booking={b} onPress={() => onBookingPress(b)} />
           ))}
         </>
       )}
@@ -277,7 +304,7 @@ function LogisticsTab({
             Accommodation
           </Text>
           {accommodations.map((b, i) => (
-            <SavedAccommodationCard key={i} booking={b} />
+            <SavedAccommodationCard key={i} booking={b} onPress={() => onBookingPress(b)} />
           ))}
         </>
       )}
@@ -317,7 +344,7 @@ export default function StopDetailScreen() {
   const [activeTab, setActiveTab] = useState('Logistics');
 
   // Saved bookings shown in the Logistics tab
-  const [savedBookings, setSavedBookings] = useState<ParsedBooking[]>([]);
+  const [savedBookings, setSavedBookings] = useState<SavedBookingItem[]>([]);
 
   // PDF parsing state
   const [parsingFlight, setParsingFlight] = useState(false);
@@ -359,26 +386,34 @@ export default function StopDetailScreen() {
     const userId = session?.user?.id;
     if (!userId) return;
 
-    const items: ParsedBooking[] = [];
+    const items: SavedBookingItem[] = [];
 
     // Accommodation saved to this stop
     const { data: accs, error: accErr } = await supabase
       .from('accommodation')
-      .select('id, name, confirmation_ref')
+      .select('id, name, confirmation_ref, check_in_date, check_out_date')
       .eq('stop_id', stopData.id)
       .eq('owner_id', userId);
 
     if (accErr) console.warn('[logistics] accommodation fetch error:', accErr.message);
 
     for (const a of accs ?? []) {
+      const checkInDate: string = (a as any).check_in_date ?? '';
+      const checkOutDate: string = (a as any).check_out_date ?? '';
+      // Compute nights from the booking's own dates; fall back to the stop's dates
+      const nights = checkInDate && checkOutDate
+        ? computeNightsFromDates(checkInDate, checkOutDate)
+        : computeNights(stopData);
       items.push({
+        _dbId: (a as any).id,
+        _source: 'accommodation',
         type: 'accommodation',
         hotel_name: (a as any).name ?? '',
         city: stopData.city,
-        check_in_date: stopData.start_date ?? '',
-        check_out_date: stopData.end_date ?? '',
+        check_in_date: checkInDate,
+        check_out_date: checkOutDate,
         booking_ref: (a as any).confirmation_ref ?? '',
-        nights: null,
+        nights,
       });
     }
 
@@ -404,6 +439,8 @@ export default function StopDetailScreen() {
       for (const lb of lbs ?? []) {
         const leg = (inboundLegs as any[]).find((l) => l.id === lb.leg_id);
         items.push({
+          _dbId: lb.id,
+          _source: 'leg_bookings',
           type: 'flight',
           airline: lb.operator ?? '',
           flight_number: lb.reference ?? '',
@@ -419,7 +456,59 @@ export default function StopDetailScreen() {
       }
     }
 
+    // Fallback flights saved to saved_items (no matching leg at save time)
+    const { data: savedFlights, error: sfErr } = await supabase
+      .from('saved_items')
+      .select('id, note')
+      .eq('stop_id', stopData.id)
+      .eq('creator_id', userId)
+      .eq('category', 'Transport');
+
+    if (sfErr) console.warn('[logistics] saved_items flight fetch error:', sfErr.message);
+
+    for (const sf of savedFlights ?? []) {
+      try {
+        const parsed = JSON.parse((sf as any).note ?? '{}');
+        if (!parsed.origin_city && !parsed.airline) continue; // not our JSON format
+        items.push({
+          _dbId: (sf as any).id,
+          _source: 'saved_items',
+          type: 'flight',
+          airline: parsed.airline ?? '',
+          flight_number: parsed.flight_number ?? '',
+          origin_city: parsed.origin_city ?? '',
+          destination_city: parsed.destination_city ?? '',
+          departure_date: parsed.departure_date ?? '',
+          departure_time: parsed.departure_time ?? '',
+          arrival_date: parsed.arrival_date ?? '',
+          arrival_time: parsed.arrival_time ?? '',
+          booking_ref: parsed.booking_ref ?? '',
+          seat: parsed.seat ?? null,
+        });
+      } catch {
+        // note wasn't our JSON — skip
+      }
+    }
+
     setSavedBookings(items);
+  }
+
+  // Reload saved bookings whenever this screen comes back into focus (e.g. after
+  // returning from booking-detail where a booking may have been deleted).
+  useFocusEffect(
+    useCallback(() => {
+      if (!stop) return;
+      loadSavedBookings(stop);
+    }, [stop]),
+  );
+
+  // ── Navigate to booking detail ─────────────────────────────────────────────
+
+  function handleBookingPress(booking: SavedBookingItem) {
+    router.push({
+      pathname: '/booking-detail',
+      params: { type: booking.type, id: booking._dbId, source: booking._source },
+    });
   }
 
   // ── PDF pick + parse ───────────────────────────────────────────────────────
@@ -448,7 +537,6 @@ export default function StopDetailScreen() {
   // ── Save booking ──────────────────────────────────────────────────────────
 
   async function handleSave(booking: ParsedBooking, selectedStopId: string | null) {
-    console.log('[handleSave] fired', { type: booking.type, selectedStopId });
     setSaving(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -456,16 +544,16 @@ export default function StopDetailScreen() {
       if (!userId) throw new Error('Not authenticated.');
 
       if (booking.type === 'accommodation' && selectedStopId) {
-        console.log('[handleSave] inserting accommodation', booking.hotel_name);
         const { error: insertErr } = await supabase.from('accommodation').insert({
           stop_id: selectedStopId,
           owner_id: userId,
           name: booking.hotel_name,
           confirmation_ref: booking.booking_ref || null,
-          // check_in / check_out are time-of-day fields; dates come from the stop
+          check_in_date: booking.check_in_date || null,
+          check_out_date: booking.check_out_date || null,
+          // check_in / check_out are time-of-day fields, left empty until user fills them
         });
         if (insertErr) throw new Error(insertErr.message);
-        console.log('[handleSave] accommodation saved OK');
 
       } else if (booking.type === 'flight') {
         // Try to find the inbound leg for this stop
@@ -478,7 +566,6 @@ export default function StopDetailScreen() {
         const matchedLeg = (inboundLegs ?? [])[0] as any;
 
         if (matchedLeg) {
-          console.log('[handleSave] inserting leg_booking for leg', matchedLeg.id);
           const { error: lbErr } = await supabase.from('leg_bookings').insert({
             leg_id: matchedLeg.id,
             owner_id: userId,
@@ -488,22 +575,29 @@ export default function StopDetailScreen() {
             confirmation_ref: booking.booking_ref,
           });
           if (lbErr) throw new Error(lbErr.message);
-          console.log('[handleSave] leg_booking saved OK');
         } else {
-          console.log('[handleSave] no inbound leg found, falling back to saved_items');
           const { error: siErr } = await supabase.from('saved_items').insert({
             stop_id: selectedStopId ?? stop?.id ?? null,
             creator_id: userId,
             name: `${booking.airline} ${booking.flight_number}`,
             category: 'Transport',
-            note: `Flight ${booking.origin_city} → ${booking.destination_city} on ${booking.departure_date}. Ref: ${booking.booking_ref}`,
+            note: JSON.stringify({
+              airline: booking.airline,
+              flight_number: booking.flight_number,
+              origin_city: booking.origin_city,
+              destination_city: booking.destination_city,
+              departure_date: booking.departure_date,
+              departure_time: booking.departure_time,
+              arrival_date: booking.arrival_date,
+              arrival_time: booking.arrival_time,
+              booking_ref: booking.booking_ref,
+              seat: booking.seat,
+            }),
           });
           if (siErr) throw new Error(siErr.message);
-          console.log('[handleSave] saved_items fallback saved OK');
         }
 
       } else {
-        console.log('[handleSave] inserting other/saved_item');
         const { error: siErr } = await supabase.from('saved_items').insert({
           stop_id: selectedStopId ?? stop?.id ?? null,
           creator_id: userId,
@@ -513,8 +607,8 @@ export default function StopDetailScreen() {
         if (siErr) throw new Error(siErr.message);
       }
 
-      // Optimistically add to the displayed list
-      setSavedBookings((prev) => [...prev, booking]);
+      // Reload from DB so the new item gets its proper _dbId
+      if (stop) await loadSavedBookings(stop);
 
       setPreviewVisible(false);
       setParsedBooking(null);
@@ -600,6 +694,7 @@ export default function StopDetailScreen() {
           onDevAccommodation={() => { setParsedBooking(DEV_ACCOMMODATION); setPreviewVisible(true); }}
           parsingFlight={parsingFlight}
           parsingAccommodation={parsingAccommodation}
+          onBookingPress={handleBookingPress}
         />
       )}
       {activeTab === 'Days' && <PlaceholderTab label="Days" />}
@@ -667,6 +762,7 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05, shadowRadius: 6, elevation: 2,
   },
+  savedCardPressed: { opacity: 0.85 },
   savedCardIconWrap: {
     width: 36, height: 36, borderRadius: 18,
     backgroundColor: '#EBF3F6',
