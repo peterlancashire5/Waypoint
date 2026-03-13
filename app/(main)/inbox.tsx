@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Alert,
   Animated,
@@ -14,13 +14,9 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Feather } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
-import * as DocumentPicker from 'expo-document-picker';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
-import { supabase } from '@/lib/supabase';
-import { parseBookingFile, mediaTypeFromUri, readUriAsBase64, type ParsedBooking } from '@/lib/claude';
-import BookingPreviewSheet, { type StopOption } from '@/components/BookingPreviewSheet';
+import QuickCaptureFAB from '@/components/QuickCaptureFAB';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -225,40 +221,6 @@ export default function InboxScreen() {
   const [sheetItem, setSheetItem] = useState<InboxItem | null>(null);
   const [sheetVisible, setSheetVisible] = useState(false);
 
-  // PDF + booking state
-  const [parsing, setParsing] = useState(false);
-  const [parsedBooking, setParsedBooking] = useState<ParsedBooking | null>(null);
-  const [previewVisible, setPreviewVisible] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [allStops, setAllStops] = useState<StopOption[]>([]);
-
-  // Fetch all stops for stop-matching
-  useFocusEffect(
-    useCallback(() => {
-      const load = async () => {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (!session?.user) return;
-
-        const { data } = await supabase
-          .from('stops')
-          .select('id, city, trips(name)')
-          .eq('trips.owner_id', session.user.id)
-          .limit(100);
-
-        if (data) {
-          setAllStops(
-            (data as any[]).map((s) => ({
-              id: s.id,
-              city: s.city,
-              tripName: s.trips?.name ?? 'Trip',
-            }))
-          );
-        }
-      };
-      load();
-    }, [])
-  );
-
   // ── File-to-trip ─────────────────────────────────────────────────────────
 
   function openSheet(item: InboxItem) {
@@ -276,104 +238,6 @@ export default function InboxScreen() {
     setSheetVisible(false);
   }
 
-  // ── File upload ───────────────────────────────────────────────────────────
-
-  async function handleUploadBooking() {
-    setParsing(true);
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: ['application/pdf', 'image/jpeg', 'image/png'],
-        copyToCacheDirectory: true,
-      });
-      if (result.canceled) return;
-
-      const asset = result.assets[0];
-      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
-      const base64 = await readUriAsBase64(asset.uri);
-      const booking = await parseBookingFile(base64, mediaType);
-      setParsedBooking(booking);
-      setPreviewVisible(true);
-    } catch (err: any) {
-      Alert.alert('Could not read booking', err?.message ?? 'Please try again.');
-    } finally {
-      setParsing(false);
-    }
-  }
-
-  // ── Save booking ──────────────────────────────────────────────────────────
-
-  async function handleSaveBooking(booking: ParsedBooking, stopId: string | null) {
-    setSaving(true);
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      const userId = session?.user?.id;
-      if (!userId) throw new Error('Not authenticated.');
-
-      if (booking.type === 'accommodation' && stopId) {
-        await supabase.from('accommodation').insert({
-          stop_id: stopId,
-          owner_id: userId,
-          name: booking.hotel_name,
-          confirmation_ref: booking.booking_ref || null,
-        });
-      } else if (booking.type === 'transport' && stopId) {
-        const { data: legs } = await supabase
-          .from('legs')
-          .select('id, trip_id, to_stop:to_stop_id(city)')
-          .limit(100);
-
-        const matchedLeg = (legs ?? []).find(
-          (l: any) => l.to_stop?.city?.toLowerCase() === booking.destination_city?.toLowerCase()
-        );
-
-        if (matchedLeg) {
-          await supabase.from('leg_bookings').insert({
-            leg_id: matchedLeg.id,
-            owner_id: userId,
-            operator: booking.operator,
-            reference: booking.service_number,
-            seat: booking.seat,
-            confirmation_ref: booking.booking_ref,
-          });
-        } else {
-          await supabase.from('saved_items').insert({
-            stop_id: stopId,
-            creator_id: userId,
-            name: `${booking.operator} ${booking.service_number}`.trim(),
-            category: 'Transport',
-            note: JSON.stringify({
-              transport_type: booking.transport_type,
-              operator: booking.operator,
-              service_number: booking.service_number,
-              origin_city: booking.origin_city,
-              destination_city: booking.destination_city,
-              departure_date: booking.departure_date,
-              departure_time: booking.departure_time,
-              arrival_date: booking.arrival_date,
-              arrival_time: booking.arrival_time,
-              booking_ref: booking.booking_ref,
-              seat: booking.seat,
-            }),
-          });
-        }
-      } else {
-        await supabase.from('saved_items').insert({
-          stop_id: stopId,
-          creator_id: userId,
-          name: booking.type === 'other' ? booking.description : 'Booking document',
-          note: booking.type === 'other' ? (booking.description ?? '') : '',
-        });
-      }
-
-      setPreviewVisible(false);
-      setParsedBooking(null);
-    } catch (err: any) {
-      Alert.alert('Could not save booking', err?.message ?? 'Please try again.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
@@ -384,44 +248,6 @@ export default function InboxScreen() {
           <View style={styles.headerLeft}>
             <Text style={styles.headerTitle}>Inbox</Text>
             <Text style={styles.headerSubtitle}>Items waiting to be filed</Text>
-          </View>
-          <View style={styles.uploadButtonGroup}>
-            {__DEV__ && (
-              <Pressable
-                style={styles.devButton}
-                onPress={() => {
-                  setParsedBooking({
-                    type: 'transport',
-                    transport_type: 'flight',
-                    operator: 'Thai Airways',
-                    service_number: 'TG661',
-                    origin_city: 'Bangkok',
-                    destination_city: 'Chiang Mai',
-                    departure_date: '2025-04-02',
-                    departure_time: '09:15',
-                    arrival_date: '2025-04-02',
-                    arrival_time: '10:25',
-                    booking_ref: 'XK9A4T',
-                    seat: '14A',
-                    gate: null, terminal: null,
-                    coach: null, platform: null, origin_station: null, destination_station: null,
-                    pickup_point: null,
-                    deck: null, cabin: null, port_terminal: null,
-                  });
-                  setPreviewVisible(true);
-                }}
-              >
-                <Text style={styles.devButtonText}>DEV</Text>
-              </Pressable>
-            )}
-            <Pressable
-              style={({ pressed }) => [styles.uploadButton, pressed && styles.uploadButtonPressed, parsing && styles.uploadButtonDisabled]}
-              onPress={handleUploadBooking}
-              disabled={parsing}
-              hitSlop={8}
-            >
-              <Feather name={parsing ? 'loader' : 'upload'} size={18} color={colors.primary} />
-            </Pressable>
           </View>
         </View>
       </SafeAreaView>
@@ -451,14 +277,7 @@ export default function InboxScreen() {
         onSelect={handleSelect}
       />
 
-      <BookingPreviewSheet
-        visible={previewVisible}
-        booking={parsedBooking}
-        stops={allStops}
-        saving={saving}
-        onSave={handleSaveBooking}
-        onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); }}
-      />
+      <QuickCaptureFAB />
     </View>
   );
 }
@@ -490,29 +309,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: colors.textMuted,
   },
-  uploadButtonGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  devButton: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-    backgroundColor: '#FFE8A3',
-  },
-  devButtonText: { fontFamily: fonts.bodyBold, fontSize: 11, color: '#7A5C00' },
-  uploadButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#EBF3F6',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  uploadButtonPressed: { opacity: 0.75 },
-  uploadButtonDisabled: { opacity: 0.5 },
-
   scrollContent: { padding: 16, paddingBottom: 40 },
 
   countLabel: {

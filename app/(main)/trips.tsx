@@ -14,6 +14,7 @@ import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import QuickCaptureFAB from '@/components/QuickCaptureFAB';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -230,6 +231,7 @@ export default function TripsScreen() {
           )}
         </ScrollView>
       )}
+      <QuickCaptureFAB />
     </View>
   );
 }

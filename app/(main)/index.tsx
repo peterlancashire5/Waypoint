@@ -22,6 +22,7 @@ import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import QuickCaptureFAB from '@/components/QuickCaptureFAB';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -183,26 +184,6 @@ function CityChip({ stop, index, isSelected, onPress }: {
         <Text style={[styles.chipNights, isSelected && styles.chipNightsSelected]}>{stop.nights}n</Text>
       )}
     </Pressable>
-  );
-}
-
-// ─── FAB ──────────────────────────────────────────────────────────────────────
-
-function FAB({ onPress }: { onPress: () => void }) {
-  const scale = useSharedValue(1);
-  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
-
-  return (
-    <Animated.View style={[styles.fab, animStyle]} entering={FadeInUp.delay(400).springify()}>
-      <Pressable
-        style={styles.fabInner}
-        onPressIn={() => { scale.value = withSpring(0.93, { damping: 10, stiffness: 400 }); }}
-        onPressOut={() => { scale.value = withSpring(1, { damping: 8, stiffness: 300 }); onPress(); }}
-        hitSlop={8}
-      >
-        <Feather name="camera" size={22} color={colors.white} />
-      </Pressable>
-    </Animated.View>
   );
 }
 
@@ -463,9 +444,7 @@ export default function HomeScreen() {
         </Pressable>
       </Animated.View>
 
-      <View style={styles.fabContainer} pointerEvents="box-none">
-        <FAB onPress={() => console.log('Quick capture')} />
-      </View>
+      <QuickCaptureFAB />
     </View>
   );
 }
@@ -567,11 +546,5 @@ const styles = StyleSheet.create({
   },
   viewTripLabel: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.primary },
 
-  // FAB
-  fabContainer: { position: 'absolute', right: 20, bottom: 200 },
-  fab: {
-    width: 56, height: 56, borderRadius: 28, backgroundColor: colors.accent,
-    shadowColor: colors.accent, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.35, shadowRadius: 12, elevation: 8,
-  },
-  fabInner: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
 });
