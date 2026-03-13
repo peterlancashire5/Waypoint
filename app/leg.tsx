@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
+  ActivityIndicator,
   View,
   Text,
   StyleSheet,
@@ -8,43 +9,91 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
+import { supabase } from '@/lib/supabase';
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-const MOCK_LEG = {
-  from: 'Bangkok',
-  to: 'Chiang Mai',
-  type: 'flight' as const,
-  date: '17 Mar',
-  duration: '1h 20m',
-  operator: 'Bangkok Airways',
-  flightNumber: 'PG 207',
-  departure: { time: '06:45', station: 'Suvarnabhumi Airport', code: 'BKK' },
-  arrival: { time: '08:05', station: 'Chiang Mai International', code: 'CNX' },
-  seat: '14A — Window',
-  confirmationRef: 'BKAIR-882441',
-  status: 'Confirmed' as const,
-};
+type TransportType = 'flight' | 'train' | 'bus' | 'car' | 'ferry' | 'other';
+
+interface LegBooking {
+  id: string;
+  operator: string | null;
+  reference: string | null;
+  seat: string | null;
+  confirmation_ref: string | null;
+}
+
+interface LegDetail {
+  id: string;
+  transport_type: TransportType | null;
+  departure_time: string | null;
+  arrival_time: string | null;
+  from_stop: { city: string; country: string | null } | null;
+  to_stop: { city: string; country: string | null } | null;
+  leg_bookings: LegBooking[];
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function formatTime(ts: string | null): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const h = d.getHours().toString().padStart(2, '0');
+  const m = d.getMinutes().toString().padStart(2, '0');
+  return `${h}:${m}`;
+}
+
+function formatDate(ts: string | null): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+}
+
+function computeDuration(dep: string | null, arr: string | null): string {
+  if (!dep || !arr) return '';
+  const ms = new Date(arr).getTime() - new Date(dep).getTime();
+  if (ms <= 0) return '';
+  const h = Math.floor(ms / (1000 * 60 * 60));
+  const m = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function transportLabel(type: TransportType | null): string {
+  if (!type) return 'Transfer';
+  return type.charAt(0).toUpperCase() + type.slice(1);
+}
+
+function referenceLabel(type: TransportType | null): string {
+  if (type === 'flight') return 'Flight number';
+  if (type === 'train') return 'Train number';
+  if (type === 'bus') return 'Service number';
+  return 'Reference';
+}
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function TransportIcon({ type, size = 20, color = colors.primary }: {
-  type: 'flight' | 'train' | 'bus' | 'ferry';
+  type: TransportType | null;
   size?: number;
   color?: string;
 }) {
-  const iconMap = {
-    flight: 'airplane' as const,
-    train: 'train' as const,
-    bus: 'bus' as const,
-    ferry: 'ferry' as const,
+  const iconMap: Record<string, React.ComponentProps<typeof MaterialCommunityIcons>['name']> = {
+    flight: 'airplane',
+    train: 'train',
+    bus: 'bus',
+    ferry: 'ferry',
+    car: 'car',
+    other: 'dots-horizontal',
   };
-  return <MaterialCommunityIcons name={iconMap[type]} size={size} color={color} />;
+  const name = (type && iconMap[type]) ? iconMap[type] : 'dots-horizontal';
+  return <MaterialCommunityIcons name={name} size={size} color={color} />;
 }
 
 function InfoRow({ icon, label, value, mono = false }: {
@@ -64,45 +113,140 @@ function InfoRow({ icon, label, value, mono = false }: {
   );
 }
 
-function RouteTimeline({ leg }: { leg: typeof MOCK_LEG }) {
+function RouteTimeline({ leg }: { leg: LegDetail }) {
+  const duration = computeDuration(leg.departure_time, leg.arrival_time);
   return (
     <View style={styles.routeTimeline}>
       <View style={styles.routeEndpoint}>
-        <Text style={styles.routeTime}>{leg.departure.time}</Text>
-        <Text style={styles.routeCode}>{leg.departure.code}</Text>
-        <Text style={styles.routeStation}>{leg.departure.station}</Text>
+        <Text style={styles.routeTime}>{formatTime(leg.departure_time)}</Text>
+        <Text style={styles.routeCity}>{leg.from_stop?.city ?? '—'}</Text>
+        {leg.from_stop?.country && (
+          <Text style={styles.routeCountry}>{leg.from_stop.country}</Text>
+        )}
       </View>
       <View style={styles.routeMiddle}>
         <View style={styles.routeDot} />
         <View style={styles.routeLine} />
-        <TransportIcon type={leg.type} size={18} color={colors.primary} />
+        <TransportIcon type={leg.transport_type} size={18} color={colors.primary} />
         <View style={styles.routeLine} />
         <View style={styles.routeDot} />
-        <Text style={styles.routeDuration}>{leg.duration}</Text>
+        {duration ? <Text style={styles.routeDuration}>{duration}</Text> : null}
       </View>
       <View style={[styles.routeEndpoint, styles.routeEndpointRight]}>
-        <Text style={styles.routeTime}>{leg.arrival.time}</Text>
-        <Text style={styles.routeCode}>{leg.arrival.code}</Text>
-        <Text style={[styles.routeStation, styles.routeStationRight]}>{leg.arrival.station}</Text>
+        <Text style={styles.routeTime}>{formatTime(leg.arrival_time)}</Text>
+        <Text style={styles.routeCity}>{leg.to_stop?.city ?? '—'}</Text>
+        {leg.to_stop?.country && (
+          <Text style={[styles.routeCountry, styles.routeCountryRight]}>{leg.to_stop.country}</Text>
+        )}
       </View>
     </View>
   );
 }
 
-// ─── Main screen ──────────────────────────────────────────────────────────────
+function EmptyBooking() {
+  return (
+    <View style={styles.emptyBooking}>
+      <Feather name="file-text" size={24} color={colors.border} />
+      <Text style={styles.emptyBookingHeading}>No booking added yet</Text>
+      <Text style={styles.emptyBookingBody}>Add a flight, train or transfer</Text>
+    </View>
+  );
+}
+
+function BookingCard({ booking, type }: { booking: LegBooking; type: TransportType | null }) {
+  const hasAny = booking.operator || booking.reference || booking.seat || booking.confirmation_ref;
+  if (!hasAny) return <EmptyBooking />;
+  return (
+    <>
+      {booking.operator && (
+        <InfoRow icon="tag" label="Operator" value={booking.operator} />
+      )}
+      {booking.reference && (
+        <InfoRow icon="hash" label={referenceLabel(type)} value={booking.reference} />
+      )}
+      {booking.seat && (
+        <InfoRow icon="user" label="Seat" value={booking.seat} />
+      )}
+      {booking.confirmation_ref && (
+        <InfoRow icon="file-text" label="Confirmation" value={booking.confirmation_ref} mono />
+      )}
+    </>
+  );
+}
+
+// ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function LegScreen() {
   const router = useRouter();
-  const leg = MOCK_LEG;
+  const { legId } = useLocalSearchParams<{ legId: string }>();
+  const [leg, setLeg] = useState<LegDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchLeg = async () => {
+      if (!legId) {
+        setError('No leg specified.');
+        setLoading(false);
+        return;
+      }
+
+      const { data, error: fetchError } = await supabase
+        .from('legs')
+        .select('*, from_stop:from_stop_id(city, country), to_stop:to_stop_id(city, country), leg_bookings(*)')
+        .eq('id', legId)
+        .single();
+
+      if (fetchError || !data) {
+        setError('Could not load this leg.');
+      } else {
+        setLeg(data as LegDetail);
+      }
+      setLoading(false);
+    };
+
+    fetchLeg();
+  }, [legId]);
+
+  // ── Loading ──────────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centred]}>
+        <StatusBar style="dark" />
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  // ── Error ────────────────────────────────────────────────────────────────
+  if (error || !leg) {
+    return (
+      <View style={styles.container}>
+        <StatusBar style="dark" />
+        <View style={styles.handleBar}><View style={styles.handle} /></View>
+        <View style={styles.centred}>
+          <Text style={styles.errorText}>{error ?? 'Something went wrong.'}</Text>
+        </View>
+        <SafeAreaView edges={['bottom']} style={styles.footer}>
+          <Pressable style={styles.closeButton} onPress={() => router.back()}>
+            <Text style={styles.closeButtonLabel}>Close</Text>
+          </Pressable>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  const fromCity = leg.from_stop?.city ?? '—';
+  const toCity = leg.to_stop?.city ?? '—';
+  const date = formatDate(leg.departure_time);
+  const duration = computeDuration(leg.departure_time, leg.arrival_time);
+  const booking = leg.leg_bookings[0] ?? null;
 
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
-
-      {/* Drag handle */}
-      <View style={styles.handleBar}>
-        <View style={styles.handle} />
-      </View>
+      <View style={styles.handleBar}><View style={styles.handle} /></View>
 
       <ScrollView
         style={styles.flex1}
@@ -113,18 +257,16 @@ export default function LegScreen() {
         <View style={styles.header}>
           <View style={styles.headerTop}>
             <View style={styles.transportBadge}>
-              <TransportIcon type={leg.type} size={14} color={colors.primary} />
-              <Text style={styles.transportLabel}>
-                {leg.type.charAt(0).toUpperCase() + leg.type.slice(1)}
-              </Text>
-            </View>
-            <View style={[styles.statusPill, styles.statusConfirmed]}>
-              <View style={styles.statusDot} />
-              <Text style={styles.statusLabel}>{leg.status}</Text>
+              <TransportIcon type={leg.transport_type} size={14} color={colors.primary} />
+              <Text style={styles.transportLabel}>{transportLabel(leg.transport_type)}</Text>
             </View>
           </View>
-          <Text style={styles.routeTitle}>{leg.from} → {leg.to}</Text>
-          <Text style={styles.routeMeta}>{leg.date} · {leg.duration}</Text>
+          <Text style={styles.routeTitle}>{fromCity} → {toCity}</Text>
+          {(date || duration) ? (
+            <Text style={styles.routeMeta}>
+              {[date, duration].filter(Boolean).join(' · ')}
+            </Text>
+          ) : null}
         </View>
 
         {/* Route timeline card */}
@@ -136,28 +278,14 @@ export default function LegScreen() {
         <View style={styles.card}>
           <Text style={styles.cardSectionLabel}>Booking details</Text>
           <View style={styles.divider} />
-          <InfoRow icon="tag" label="Operator" value={leg.operator} />
-          <InfoRow icon="hash" label="Flight number" value={leg.flightNumber} />
-          <InfoRow icon="user" label="Seat" value={leg.seat} />
-          <InfoRow icon="file-text" label="Confirmation" value={leg.confirmationRef} mono />
-        </View>
-
-        {/* Barcode card */}
-        <View style={styles.card}>
-          <Text style={styles.cardSectionLabel}>Boarding pass</Text>
-          <View style={styles.divider} />
-          <View style={styles.barcodePlaceholder}>
-            <View style={styles.barcodeStripes} />
-            <Text style={styles.barcodeText}>Scan at gate · {leg.flightNumber}</Text>
-          </View>
-          <Pressable style={styles.walletButton}>
-            <MaterialCommunityIcons name="wallet" size={18} color={colors.white} />
-            <Text style={styles.walletButtonLabel}>Add to Apple Wallet</Text>
-          </Pressable>
+          {booking ? (
+            <BookingCard booking={booking} type={leg.transport_type} />
+          ) : (
+            <EmptyBooking />
+          )}
         </View>
       </ScrollView>
 
-      {/* Close button */}
       <SafeAreaView edges={['bottom']} style={styles.footer}>
         <Pressable style={styles.closeButton} onPress={() => router.back()}>
           <Text style={styles.closeButtonLabel}>Close</Text>
@@ -173,7 +301,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.white },
   flex1: { flex: 1 },
 
-  // Handle
   handleBar: { paddingTop: 12, paddingBottom: 4, alignItems: 'center' },
   handle: { width: 36, height: 4, borderRadius: 2, backgroundColor: colors.border },
 
@@ -181,20 +308,13 @@ const styles = StyleSheet.create({
 
   // Header
   header: { marginBottom: 20 },
-  headerTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  headerTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   transportBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: '#EBF3F6', borderRadius: 8,
     paddingHorizontal: 10, paddingVertical: 5,
   },
   transportLabel: { fontFamily: fonts.bodyBold, fontSize: 12, color: colors.primary },
-  statusPill: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5,
-  },
-  statusConfirmed: { backgroundColor: '#EAF5EE' },
-  statusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.success },
-  statusLabel: { fontFamily: fonts.bodyBold, fontSize: 12, color: colors.success },
   routeTitle: {
     fontFamily: fonts.displayBold, fontSize: 26, color: colors.text,
     letterSpacing: -0.3, marginBottom: 4,
@@ -220,9 +340,9 @@ const styles = StyleSheet.create({
   routeEndpoint: { flex: 1 },
   routeEndpointRight: { alignItems: 'flex-end' },
   routeTime: { fontFamily: fonts.displayBold, fontSize: 22, color: colors.text, letterSpacing: -0.3 },
-  routeCode: { fontFamily: fonts.bodyBold, fontSize: 12, color: colors.primary, marginTop: 2 },
-  routeStation: { fontFamily: fonts.body, fontSize: 11, color: colors.textMuted, marginTop: 2, lineHeight: 15 },
-  routeStationRight: { textAlign: 'right' },
+  routeCity: { fontFamily: fonts.bodyBold, fontSize: 13, color: colors.text, marginTop: 3 },
+  routeCountry: { fontFamily: fonts.body, fontSize: 11, color: colors.textMuted, marginTop: 1 },
+  routeCountryRight: { textAlign: 'right' },
   routeMiddle: {
     flex: 1, alignItems: 'center', gap: 4, paddingTop: 8, paddingHorizontal: 8,
   },
@@ -239,28 +359,24 @@ const styles = StyleSheet.create({
   infoContent: { flex: 1 },
   infoLabel: { fontFamily: fonts.body, fontSize: 11, color: colors.textMuted, marginBottom: 1 },
   infoValue: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.text },
-  infoValueMono: { fontFamily: fonts.bodyBold, fontSize: 13, letterSpacing: 0.5, color: colors.text },
+  infoValueMono: { fontFamily: fonts.bodyBold, fontSize: 13, letterSpacing: 0.5 },
 
-  // Barcode
-  barcodePlaceholder: {
-    backgroundColor: colors.background, borderRadius: 12,
-    height: 100, marginBottom: 14,
-    alignItems: 'center', justifyContent: 'center',
-    overflow: 'hidden',
+  // Empty booking
+  emptyBooking: { alignItems: 'center', paddingVertical: 20, gap: 8 },
+  emptyBookingHeading: {
+    fontFamily: fonts.bodyBold, fontSize: 15, color: colors.text,
   },
-  barcodeStripes: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: colors.background,
-  },
-  barcodeText: { fontFamily: fonts.body, fontSize: 12, color: colors.textMuted, zIndex: 1 },
-  walletButton: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-    gap: 8, backgroundColor: colors.text, borderRadius: 12, paddingVertical: 13,
-  },
-  walletButtonLabel: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.white },
+  emptyBookingBody: { fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
+
+  // Loading / error
+  centred: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
+  errorText: { fontFamily: fonts.body, fontSize: 14, color: colors.textMuted, textAlign: 'center' },
 
   // Footer
-  footer: { paddingHorizontal: 20, paddingBottom: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 12 },
+  footer: {
+    paddingHorizontal: 20, paddingBottom: 8,
+    borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 12,
+  },
   closeButton: {
     backgroundColor: colors.background, borderRadius: 12,
     paddingVertical: 14, alignItems: 'center',

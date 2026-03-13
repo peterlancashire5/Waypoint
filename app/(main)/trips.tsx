@@ -5,6 +5,7 @@ import {
   StyleSheet,
   Pressable,
   ScrollView,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -12,7 +13,7 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
-import { getTrips, type StoredTrip } from '@/lib/tripStore';
+import { supabase } from '@/lib/supabase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,38 +24,46 @@ interface TripSummary {
   dateRange: string;
   stopCount: number;
   chips: string[];
-  route?: string | null;
 }
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
+interface DbTrip {
+  id: string;
+  name: string;
+  type: 'single' | 'multi';
+  start_date: string | null;
+  end_date: string | null;
+  status: 'upcoming' | 'active' | 'past';
+  created_at: string;
+  stops: { city: string }[];
+}
 
-const MOCK_TRIPS: TripSummary[] = [
-  {
-    id: 't1',
-    name: 'Southeast Asia',
-    status: 'Upcoming',
-    dateRange: '14 Mar – 8 Apr',
-    stopCount: 5,
-    chips: ['Thailand', 'Laos', 'Vietnam'],
-    route: '/(main)/',
-  },
-  {
-    id: 't2',
-    name: 'Japan Winter',
-    status: 'Past',
-    dateRange: '10 Jan – 22 Jan',
-    stopCount: 4,
-    chips: ['Japan'],
-  },
-  {
-    id: 't3',
-    name: 'Portugal Road Trip',
-    status: 'Past',
-    dateRange: '3 Sep – 12 Sep 2025',
-    stopCount: 3,
-    chips: ['Portugal'],
-  },
-];
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function formatDateRange(start: string | null, end: string | null): string {
+  if (!start) return '—';
+  const s = new Date(start + 'T00:00:00');
+  const sStr = `${s.getDate()} ${MONTHS[s.getMonth()]}`;
+  if (!end) return sStr;
+  const e = new Date(end + 'T00:00:00');
+  const eStr = `${e.getDate()} ${MONTHS[e.getMonth()]}`;
+  if (s.getFullYear() !== e.getFullYear()) {
+    return `${sStr} ${s.getFullYear()} – ${eStr} ${e.getFullYear()}`;
+  }
+  return `${sStr} – ${eStr}`;
+}
+
+function toTripSummary(t: DbTrip): TripSummary {
+  return {
+    id: t.id,
+    name: t.name,
+    status: t.status === 'past' ? 'Past' : 'Upcoming',
+    dateRange: formatDateRange(t.start_date, t.end_date),
+    stopCount: t.stops.length,
+    chips: t.stops.map((s) => s.city).filter(Boolean),
+  };
+}
 
 // ─── Components ───────────────────────────────────────────────────────────────
 
@@ -106,20 +115,60 @@ function TripCard({ trip, onPress }: { trip: TripSummary; onPress?: () => void }
   );
 }
 
+function EmptyState({ onPress }: { onPress: () => void }) {
+  return (
+    <View style={styles.emptyWrap}>
+      <View style={styles.emptyIcon}>
+        <Feather name="map" size={30} color={colors.textMuted} />
+      </View>
+      <Text style={styles.emptyHeading}>No trips yet</Text>
+      <Text style={styles.emptySubtitle}>Tap the button above to plan your first trip</Text>
+      <Pressable style={styles.emptyButton} onPress={onPress}>
+        <Feather name="plus" size={16} color={colors.white} />
+        <Text style={styles.emptyButtonText}>Create a trip</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function TripsScreen() {
   const router = useRouter();
-  const [userTrips, setUserTrips] = useState<StoredTrip[]>([]);
+  const [trips, setTrips] = useState<TripSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useFocusEffect(
     useCallback(() => {
-      setUserTrips(getTrips());
+      const fetchTrips = async () => {
+        setLoading(true);
+        setError(null);
+
+        const { data: { session } } = await supabase.auth.getSession();
+        const user = session?.user;
+        if (!user) { setLoading(false); return; }
+
+        const { data, error: fetchError } = await supabase
+          .from('trips')
+          .select('*, stops(city)')
+          .eq('owner_id', user.id)
+          .order('created_at', { ascending: false });
+
+        if (fetchError) {
+          setError('Could not load trips.');
+        } else {
+          setTrips((data as DbTrip[]).map(toTripSummary));
+        }
+        setLoading(false);
+      };
+
+      fetchTrips();
     }, [])
   );
 
-  const upcoming = MOCK_TRIPS.filter((t) => t.status === 'Upcoming');
-  const past = MOCK_TRIPS.filter((t) => t.status === 'Past');
+  const upcoming = trips.filter((t) => t.status === 'Upcoming');
+  const past = trips.filter((t) => t.status === 'Past');
 
   return (
     <View style={styles.container}>
@@ -133,32 +182,54 @@ export default function TripsScreen() {
         </View>
       </SafeAreaView>
 
-      <ScrollView
-        style={styles.flex1}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        <Text style={styles.sectionLabel}>Upcoming</Text>
+      {loading ? (
+        <View style={styles.centred}>
+          <ActivityIndicator size="large" color={colors.primary} />
+        </View>
+      ) : error ? (
+        <View style={styles.centred}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable onPress={fetchTrips} style={styles.retryButton}>
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      ) : trips.length === 0 ? (
+        <EmptyState onPress={() => router.push('/create-trip')} />
+      ) : (
+        <ScrollView
+          style={styles.flex1}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {upcoming.length > 0 && (
+            <>
+              <Text style={styles.sectionLabel}>Upcoming</Text>
+              {upcoming.map((trip) => (
+                <TripCard
+                  key={trip.id}
+                  trip={trip}
+                  onPress={() => router.push({ pathname: '/trip-detail', params: { tripId: trip.id } })}
+                />
+              ))}
+            </>
+          )}
 
-        {/* User-created trips first */}
-        {userTrips.map((trip) => (
-          <TripCard key={trip.id} trip={trip} />
-        ))}
-
-        {/* Mock upcoming trips */}
-        {upcoming.map((trip) => (
-          <TripCard
-            key={trip.id}
-            trip={trip}
-            onPress={trip.route ? () => router.push(trip.route as any) : undefined}
-          />
-        ))}
-
-        <Text style={[styles.sectionLabel, styles.sectionLabelSpaced]}>Past trips</Text>
-        {past.map((trip) => (
-          <TripCard key={trip.id} trip={trip} />
-        ))}
-      </ScrollView>
+          {past.length > 0 && (
+            <>
+              <Text style={[styles.sectionLabel, upcoming.length > 0 && styles.sectionLabelSpaced]}>
+                Past trips
+              </Text>
+              {past.map((trip) => (
+                <TripCard
+                  key={trip.id}
+                  trip={trip}
+                  onPress={() => router.push({ pathname: '/trip-detail', params: { tripId: trip.id } })}
+                />
+              ))}
+            </>
+          )}
+        </ScrollView>
+      )}
     </View>
   );
 }
@@ -221,4 +292,34 @@ const styles = StyleSheet.create({
   pillLabel: { fontFamily: fonts.bodyBold, fontSize: 10, letterSpacing: 0.6, textTransform: 'uppercase' },
   pillLabelUpcoming: { color: colors.primary },
   pillLabelPast: { color: colors.textMuted },
+
+  centred: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  errorText: { fontFamily: fonts.body, fontSize: 14, color: colors.textMuted, marginBottom: 12 },
+  retryButton: {
+    paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  retryText: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.primary },
+
+  emptyWrap: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 40, paddingBottom: 60,
+  },
+  emptyIcon: {
+    width: 64, height: 64, borderRadius: 32,
+    backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center', marginBottom: 16,
+  },
+  emptyHeading: {
+    fontFamily: fonts.displayBold, fontSize: 22, color: colors.text,
+    letterSpacing: -0.2, marginBottom: 8, textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontFamily: fonts.body, fontSize: 14, color: colors.textMuted,
+    textAlign: 'center', lineHeight: 20, marginBottom: 24,
+  },
+  emptyButton: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: colors.primary, paddingHorizontal: 22, paddingVertical: 13, borderRadius: 14,
+  },
+  emptyButtonText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.white },
 });

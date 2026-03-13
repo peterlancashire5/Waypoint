@@ -36,12 +36,12 @@ export default function RootLayout() {
     Lato_700Bold,
   });
 
-  // Hide splash once fonts are ready (or errored)
+  // Hide splash once fonts and session are both resolved
   useEffect(() => {
-    if (fontsLoaded || fontError) {
+    if ((fontsLoaded || fontError) && session !== undefined) {
       SplashScreen.hideAsync();
     }
-  }, [fontsLoaded, fontError]);
+  }, [fontsLoaded, fontError, session]);
 
   // Subscribe to auth state changes
   useEffect(() => {
@@ -56,19 +56,31 @@ export default function RootLayout() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // DEV: skip auth, go straight to main
+  // Auth routing guard — use segments[0] (string) not segments (array) to
+  // avoid a new array reference on every render triggering this repeatedly.
+  const segment = segments[0];
   useEffect(() => {
-    if (!fontsLoaded) return;
-    if (segments[0] !== '(main)') router.replace('/(main)/');
-  }, [fontsLoaded]);
+    if ((!fontsLoaded && !fontError) || session === undefined) return;
+
+    const inAuthGroup = segment === '(auth)';
+
+    if (!session && !inAuthGroup) {
+      router.replace('/(auth)/');
+    } else if (session && inAuthGroup) {
+      router.replace('/(main)/');
+    }
+  }, [fontsLoaded, fontError, session, segment]);
 
   // Don't render anything until fonts and session are resolved
-  if (!fontsLoaded && !fontError) return null;
+  if ((!fontsLoaded && !fontError) || session === undefined) return null;
 
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="leg" options={{ presentation: 'modal', headerShown: false }} />
       <Stack.Screen name="create-trip" options={{ presentation: 'modal', headerShown: false }} />
+      <Stack.Screen name="stop-detail" options={{ headerShown: false }} />
+      <Stack.Screen name="trip-detail" options={{ headerShown: false }} />
+      <Stack.Screen name="settings" options={{ headerShown: false }} />
     </Stack>
   );
 }

@@ -1,5 +1,7 @@
 import React, { useState, useRef } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   View,
   Text,
   StyleSheet,
@@ -16,12 +18,45 @@ import { useRouter } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
-import { addTrip } from '@/lib/tripStore';
+import { supabase } from '@/lib/supabase';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type TripType = 'single' | 'multi';
-interface TripStop { id: string; city: string; nights: string; }
+
+interface TripStop {
+  id: string;
+  city: string;
+  nights: string;
+  lat: number | null;
+  lng: number | null;
+  geocoding: boolean;
+}
+
+interface GeoResult {
+  lat: number;
+  lng: number;
+  name: string;
+}
+
+// ─── Geocoding ────────────────────────────────────────────────────────────────
+
+async function geocodeCity(name: string, signal?: AbortSignal): Promise<GeoResult | null> {
+  try {
+    const encoded = encodeURIComponent(name.trim());
+    const res = await fetch(
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encoded}&count=1&language=en&format=json`,
+      { signal },
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    const r = json?.results?.[0];
+    if (!r) return null;
+    return { lat: r.latitude, lng: r.longitude, name: r.name };
+  } catch {
+    return null;
+  }
+}
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -240,8 +275,11 @@ function Step2({ tripType, onSelect, onBack }: {
 
 // ─── Step 3 (Single): Destination + Dates ─────────────────────────────────────
 
-function Step3Single({ destination, setDestination, arrivalDate, setArrivalDate,
-  departureDate, setDepartureDate, departureDateUnknown, setDepartureDateUnknown, onNext, onBack }: {
+function Step3Single({
+  destination, setDestination, arrivalDate, setArrivalDate,
+  departureDate, setDepartureDate, departureDateUnknown, setDepartureDateUnknown,
+  geocodingDestination, onDestinationBlur, onNext, onBack,
+}: {
   destination: string;
   setDestination: (v: string) => void;
   arrivalDate: string;
@@ -250,6 +288,8 @@ function Step3Single({ destination, setDestination, arrivalDate, setArrivalDate,
   setDepartureDate: (v: string) => void;
   departureDateUnknown: boolean;
   setDepartureDateUnknown: (v: boolean) => void;
+  geocodingDestination: boolean;
+  onDestinationBlur: () => void;
   onNext: () => void;
   onBack: () => void;
 }) {
@@ -263,11 +303,17 @@ function Step3Single({ destination, setDestination, arrivalDate, setArrivalDate,
 
         {/* City */}
         <View>
-          <Text style={styles.fieldLabel}>Destination</Text>
+          <View style={styles.dateLabelRow}>
+            <Text style={styles.fieldLabel}>Destination</Text>
+            {geocodingDestination && (
+              <ActivityIndicator size="small" color={colors.textMuted} />
+            )}
+          </View>
           <TextInput
             style={styles.titleInput}
             value={destination}
             onChangeText={setDestination}
+            onBlur={onDestinationBlur}
             placeholder="e.g. Barcelona"
             placeholderTextColor={colors.border}
             autoFocus
@@ -324,7 +370,10 @@ function Step3Single({ destination, setDestination, arrivalDate, setArrivalDate,
 
 // ─── Step 3 (Multi): Trip Start + Stops with Nights ──────────────────────────
 
-function Step3Multi({ tripStartDate, setTripStartDate, stops, onAdd, onRemove, onUpdate, onMove, onNext, onBack }: {
+function Step3Multi({
+  tripStartDate, setTripStartDate, stops, onAdd, onRemove, onUpdate, onMove,
+  onCityBlur, onNext, onBack,
+}: {
   tripStartDate: string;
   setTripStartDate: (v: string) => void;
   stops: TripStop[];
@@ -332,6 +381,7 @@ function Step3Multi({ tripStartDate, setTripStartDate, stops, onAdd, onRemove, o
   onRemove: (id: string) => void;
   onUpdate: (id: string, field: 'city' | 'nights', value: string) => void;
   onMove: (id: string, dir: 'up' | 'down') => void;
+  onCityBlur: (id: string) => void;
   onNext: () => void;
   onBack: () => void;
 }) {
@@ -380,11 +430,15 @@ function Step3Multi({ tripStartDate, setTripStartDate, stops, onAdd, onRemove, o
                       style={styles.stopCityInput}
                       value={stop.city}
                       onChangeText={(v) => onUpdate(stop.id, 'city', v)}
+                      onBlur={() => onCityBlur(stop.id)}
                       placeholder="City name"
                       placeholderTextColor={colors.border}
                       autoFocus={index === stops.length - 1 && stop.city === ''}
                       returnKeyType="done"
                     />
+                    {stop.geocoding && (
+                      <ActivityIndicator size="small" color={colors.textMuted} style={styles.stopGeoSpinner} />
+                    )}
                     <View style={styles.stopReorder}>
                       <Pressable onPress={() => onMove(stop.id, 'up')} disabled={index === 0} hitSlop={4}>
                         <Feather name="chevron-up" size={15} color={index === 0 ? colors.border : colors.textMuted} />
@@ -431,7 +485,7 @@ function Step3Multi({ tripStartDate, setTripStartDate, stops, onAdd, onRemove, o
 
 // ─── Step 4 (Single): Review ──────────────────────────────────────────────────
 
-function Step4Single({ tripName, destination, arrivalDate, departureDate, departureDateUnknown, onBack, onCreate }: {
+function Step4Single({ tripName, destination, arrivalDate, departureDate, departureDateUnknown, onBack, onCreate, saving }: {
   tripName: string;
   destination: string;
   arrivalDate: string;
@@ -439,6 +493,7 @@ function Step4Single({ tripName, destination, arrivalDate, departureDate, depart
   departureDateUnknown: boolean;
   onBack: () => void;
   onCreate: () => void;
+  saving?: boolean;
 }) {
   const departureLine = departureDateUnknown ? 'TBD' : departureDate || '—';
 
@@ -490,19 +545,20 @@ function Step4Single({ tripName, destination, arrivalDate, departureDate, depart
         </View>
       </ScrollView>
 
-      <Footer onNext={onCreate} nextLabel="Create Trip" nextIcon="check" onBack={onBack} />
+      <Footer onNext={onCreate} nextLabel={saving ? 'Saving…' : 'Create Trip'} nextIcon="check" nextEnabled={!saving} onBack={onBack} />
     </View>
   );
 }
 
 // ─── Step 4 (Multi): Review ───────────────────────────────────────────────────
 
-function Step4Multi({ tripName, tripStartDate, stops, onBack, onCreate }: {
+function Step4Multi({ tripName, tripStartDate, stops, onBack, onCreate, saving }: {
   tripName: string;
   tripStartDate: string;
   stops: TripStop[];
   onBack: () => void;
   onCreate: () => void;
+  saving?: boolean;
 }) {
   const total = totalNights(stops);
   const endDate = tripEndDate(tripStartDate, stops);
@@ -565,7 +621,7 @@ function Step4Multi({ tripName, tripStartDate, stops, onBack, onCreate }: {
         </View>
       </ScrollView>
 
-      <Footer onNext={onCreate} nextLabel="Create Trip" nextIcon="check" onBack={onBack} />
+      <Footer onNext={onCreate} nextLabel={saving ? 'Saving…' : 'Create Trip'} nextIcon="check" nextEnabled={!saving} onBack={onBack} />
     </View>
   );
 }
@@ -577,16 +633,26 @@ export default function CreateTripModal() {
   const [step, setStep] = useState(1);
   const [tripName, setTripName] = useState('');
   const [tripType, setTripType] = useState<TripType | null>(null);
+
   // Single destination state
   const [destination, setDestination] = useState('');
+  const [destinationGeo, setDestinationGeo] = useState<GeoResult | null>(null);
+  const [geocodingDestination, setGeocodingDestination] = useState(false);
+  const destGeoAbort = useRef<AbortController | null>(null);
+
   const [arrivalDate, setArrivalDate] = useState('');
   const [departureDate, setDepartureDate] = useState('');
   const [departureDateUnknown, setDepartureDateUnknown] = useState(false);
+
   // Multi-stop state
   const [tripStartDate, setTripStartDate] = useState('');
   const [stops, setStops] = useState<TripStop[]>([]);
+  const stopGeoAborts = useRef<Record<string, AbortController>>({});
 
+  const [saving, setSaving] = useState(false);
   const slideAnim = useRef(new Animated.Value(0)).current;
+
+  // ── Navigation ─────────────────────────────────────────────────────────────
 
   const goTo = (next: number) => {
     const dir = next > step ? -1 : 1;
@@ -597,44 +663,70 @@ export default function CreateTripModal() {
     });
   };
 
-  const addStop = () =>
-    setStops((prev) => [...prev, { id: Date.now().toString(), city: '', nights: '' }]);
+  // ── Destination (single) change + blur ────────────────────────────────────
 
-  const removeStop = (id: string) =>
-    setStops((prev) => prev.filter((s) => s.id !== id));
-
-  const updateStop = (id: string, field: 'city' | 'nights', value: string) =>
-    setStops((prev) => prev.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
-
-  const createSingle = () => {
-    const range = arrivalDate
-      ? departureDateUnknown
-        ? `${arrivalDate} – TBD`
-        : departureDate
-          ? `${arrivalDate} – ${departureDate}`
-          : arrivalDate
-      : '—';
-    addTrip({
-      name: tripName,
-      type: 'single',
-      status: 'Upcoming',
-      dateRange: range,
-      stopCount: 1,
-      chips: [destination],
-    });
-    router.back();
+  const handleDestinationChange = (v: string) => {
+    setDestination(v);
+    setDestinationGeo(null); // clear stale geo when user edits
   };
 
-  const createMulti = () => {
-    addTrip({
-      name: tripName,
-      type: 'multi',
-      status: 'Upcoming',
-      dateRange: tripDateRange(tripStartDate, stops),
-      stopCount: stops.length,
-      chips: stops.map((s) => s.city).filter(Boolean),
-    });
-    router.back();
+  const handleDestinationBlur = async () => {
+    const name = destination.trim();
+    if (!name) return;
+
+    destGeoAbort.current?.abort();
+    const controller = new AbortController();
+    destGeoAbort.current = controller;
+
+    setGeocodingDestination(true);
+    const result = await geocodeCity(name, controller.signal);
+
+    if (!controller.signal.aborted) {
+      setDestinationGeo(result);
+      setGeocodingDestination(false);
+    }
+  };
+
+  // ── Stop management (multi) ────────────────────────────────────────────────
+
+  const addStop = () =>
+    setStops((prev) => [...prev, { id: Date.now().toString(), city: '', nights: '', lat: null, lng: null, geocoding: false }]);
+
+  const removeStop = (id: string) => {
+    stopGeoAborts.current[id]?.abort();
+    delete stopGeoAborts.current[id];
+    setStops((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  const updateStop = (id: string, field: 'city' | 'nights', value: string) =>
+    setStops((prev) => prev.map((s) => {
+      if (s.id !== id) return s;
+      // Clear stale geo whenever the city text changes
+      if (field === 'city') return { ...s, city: value, lat: null, lng: null };
+      return { ...s, [field]: value };
+    }));
+
+  const handleCityBlur = async (id: string) => {
+    const stop = stops.find((s) => s.id === id);
+    if (!stop || !stop.city.trim()) return;
+    const cityAtBlur = stop.city.trim();
+
+    stopGeoAborts.current[id]?.abort();
+    const controller = new AbortController();
+    stopGeoAborts.current[id] = controller;
+
+    setStops((prev) => prev.map((s) => s.id === id ? { ...s, geocoding: true } : s));
+
+    const result = await geocodeCity(cityAtBlur, controller.signal);
+
+    if (!controller.signal.aborted) {
+      setStops((prev) => prev.map((s) => {
+        if (s.id !== id) return s;
+        // Discard if user changed the city while we were geocoding
+        if (s.city.trim() !== cityAtBlur) return { ...s, geocoding: false };
+        return { ...s, geocoding: false, lat: result?.lat ?? null, lng: result?.lng ?? null };
+      }));
+    }
   };
 
   const moveStop = (id: string, dir: 'up' | 'down') => {
@@ -648,6 +740,132 @@ export default function CreateTripModal() {
       return next;
     });
   };
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function toISODate(date: Date): string {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  // ── Create Single ──────────────────────────────────────────────────────────
+
+  const createSingle = async () => {
+    setSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
+      if (!user) {
+        Alert.alert('Not signed in', 'Please sign in to create a trip.');
+        setSaving(false);
+        return;
+      }
+
+      const startDate = parseDate(arrivalDate);
+      const endDate = departureDateUnknown ? null : parseDate(departureDate);
+
+      const { data: trip, error: tripError } = await supabase
+        .from('trips')
+        .insert({
+          name: tripName,
+          type: 'single',
+          owner_id: user.id,
+          start_date: startDate ? toISODate(startDate) : null,
+          end_date: endDate ? toISODate(endDate) : null,
+        })
+        .select()
+        .single();
+
+      if (tripError) {
+        console.error('Trip insert error:', JSON.stringify(tripError, null, 2));
+        Alert.alert('Could not create trip', `${tripError.message}\n\nCode: ${tripError.code}\nHint: ${tripError.hint ?? 'none'}`);
+        return;
+      }
+
+      await supabase.from('stops').insert({
+        trip_id: trip.id,
+        city: destinationGeo?.name ?? destination,
+        latitude: destinationGeo?.lat ?? null,
+        longitude: destinationGeo?.lng ?? null,
+        order_index: 0,
+        start_date: startDate ? toISODate(startDate) : null,
+        end_date: endDate ? toISODate(endDate) : null,
+      });
+
+      router.back();
+    } catch (e) {
+      console.error('Failed to create trip:', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Create Multi ───────────────────────────────────────────────────────────
+
+  const createMulti = async () => {
+    setSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const user = session?.user;
+      if (!user) {
+        Alert.alert('Not signed in', 'Please sign in to create a trip.');
+        setSaving(false);
+        return;
+      }
+
+      const startDate = parseDate(tripStartDate);
+      const total = totalNights(stops);
+      const endDate = startDate && total > 0 ? addDays(startDate, total) : null;
+
+      const { data: trip, error: tripError } = await supabase
+        .from('trips')
+        .insert({
+          name: tripName,
+          type: 'multi',
+          owner_id: user.id,
+          start_date: startDate ? toISODate(startDate) : null,
+          end_date: endDate ? toISODate(endDate) : null,
+        })
+        .select()
+        .single();
+
+      if (tripError) {
+        console.error('Trip insert error:', JSON.stringify(tripError, null, 2));
+        Alert.alert('Could not create trip', `${tripError.message}\n\nCode: ${tripError.code}\nHint: ${tripError.hint ?? 'none'}`);
+        return;
+      }
+
+      let offset = 0;
+      const stopRows = stops.map((s, idx) => {
+        const nights = parseInt(s.nights, 10) || 0;
+        const stopStart = startDate ? addDays(startDate, offset) : null;
+        const stopEnd = stopStart && nights > 0 ? addDays(stopStart, nights) : null;
+        offset += nights;
+        return {
+          trip_id: trip.id,
+          city: s.city,
+          latitude: s.lat ?? null,
+          longitude: s.lng ?? null,
+          nights,
+          order_index: idx,
+          start_date: stopStart ? toISODate(stopStart) : null,
+          end_date: stopEnd ? toISODate(stopEnd) : null,
+        };
+      });
+
+      await supabase.from('stops').insert(stopRows);
+
+      router.back();
+    } catch (e) {
+      console.error('Failed to create trip:', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <View style={styles.container}>
@@ -679,10 +897,14 @@ export default function CreateTripModal() {
 
             {step === 3 && tripType === 'single' && (
               <Step3Single
-                destination={destination} setDestination={setDestination}
+                destination={destination}
+                setDestination={handleDestinationChange}
                 arrivalDate={arrivalDate} setArrivalDate={setArrivalDate}
                 departureDate={departureDate} setDepartureDate={setDepartureDate}
-                departureDateUnknown={departureDateUnknown} setDepartureDateUnknown={setDepartureDateUnknown}
+                departureDateUnknown={departureDateUnknown}
+                setDepartureDateUnknown={setDepartureDateUnknown}
+                geocodingDestination={geocodingDestination}
+                onDestinationBlur={handleDestinationBlur}
                 onNext={() => goTo(4)} onBack={() => goTo(2)}
               />
             )}
@@ -692,6 +914,7 @@ export default function CreateTripModal() {
                 tripStartDate={tripStartDate} setTripStartDate={setTripStartDate}
                 stops={stops} onAdd={addStop} onRemove={removeStop}
                 onUpdate={updateStop} onMove={moveStop}
+                onCityBlur={handleCityBlur}
                 onNext={() => goTo(4)} onBack={() => goTo(2)}
               />
             )}
@@ -701,14 +924,14 @@ export default function CreateTripModal() {
                 tripName={tripName} destination={destination}
                 arrivalDate={arrivalDate} departureDate={departureDate}
                 departureDateUnknown={departureDateUnknown}
-                onBack={() => goTo(3)} onCreate={createSingle}
+                onBack={() => goTo(3)} onCreate={createSingle} saving={saving}
               />
             )}
 
             {step === 4 && tripType === 'multi' && (
               <Step4Multi
                 tripName={tripName} tripStartDate={tripStartDate} stops={stops}
-                onBack={() => goTo(3)} onCreate={createMulti}
+                onBack={() => goTo(3)} onCreate={createMulti} saving={saving}
               />
             )}
 
@@ -842,12 +1065,13 @@ const styles = StyleSheet.create({
   stopCityInput: {
     flex: 1, fontFamily: fonts.body, fontSize: 15, color: colors.text, paddingVertical: 10,
   },
+  stopGeoSpinner: { marginRight: 2 },
   stopReorder: { alignItems: 'center', gap: 2 },
   removeButton: { padding: 4 },
 
   stopCardBottom: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingLeft: 32, // align past index badge
+    paddingLeft: 32,
     marginTop: 4,
   },
   nightsInput: {

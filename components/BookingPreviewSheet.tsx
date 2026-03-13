@@ -1,0 +1,456 @@
+import React, { useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Animated,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Feather } from '@expo/vector-icons';
+import { colors } from '@/constants/colors';
+import { fonts } from '@/constants/typography';
+import type { ParsedBooking } from '@/lib/claude';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export interface StopOption {
+  id: string;
+  city: string;
+  tripName: string;
+}
+
+interface Props {
+  visible: boolean;
+  booking: ParsedBooking | null;
+  stops: StopOption[];
+  saving: boolean;
+  onSave: (booking: ParsedBooking, stopId: string | null) => void;
+  onDiscard: () => void;
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function bestMatchStop(booking: ParsedBooking, stops: StopOption[]): StopOption | null {
+  const targetCity =
+    booking.type === 'flight'
+      ? booking.destination_city
+      : booking.type === 'accommodation'
+      ? booking.city
+      : booking.city;
+
+  if (!targetCity) return null;
+  const needle = targetCity.toLowerCase().trim();
+  return stops.find((s) => s.city.toLowerCase().trim() === needle) ?? null;
+}
+
+function bookingLabel(booking: ParsedBooking): string {
+  if (booking.type === 'flight') return 'Flight';
+  if (booking.type === 'accommodation') return 'Accommodation';
+  return 'Document';
+}
+
+function bookingIcon(booking: ParsedBooking): React.ComponentProps<typeof Feather>['name'] {
+  if (booking.type === 'flight') return 'send';
+  if (booking.type === 'accommodation') return 'home';
+  return 'file-text';
+}
+
+// ─── Detail rows ──────────────────────────────────────────────────────────────
+
+function DetailRow({ label, value }: { label: string; value: string | null }) {
+  if (!value) return null;
+  return (
+    <View style={styles.detailRow}>
+      <Text style={styles.detailLabel}>{label}</Text>
+      <Text style={styles.detailValue}>{value}</Text>
+    </View>
+  );
+}
+
+function FlightDetails({ b }: { b: Extract<ParsedBooking, { type: 'flight' }> }) {
+  return (
+    <>
+      <View style={styles.routeRow}>
+        <Text style={styles.routeCity}>{b.origin_city || '—'}</Text>
+        <Feather name="arrow-right" size={14} color={colors.textMuted} style={styles.routeArrow} />
+        <Text style={styles.routeCity}>{b.destination_city || '—'}</Text>
+      </View>
+      <DetailRow label="Airline" value={b.airline} />
+      <DetailRow label="Flight" value={b.flight_number} />
+      <DetailRow label="Departure" value={b.departure_date ? `${b.departure_date} ${b.departure_time}` : null} />
+      <DetailRow label="Arrival" value={b.arrival_date ? `${b.arrival_date} ${b.arrival_time}` : null} />
+      <DetailRow label="Booking ref" value={b.booking_ref} />
+      <DetailRow label="Seat" value={b.seat} />
+    </>
+  );
+}
+
+function AccommodationDetails({ b }: { b: Extract<ParsedBooking, { type: 'accommodation' }> }) {
+  return (
+    <>
+      <DetailRow label="Property" value={b.hotel_name} />
+      <DetailRow label="City" value={b.city} />
+      <DetailRow label="Check-in" value={b.check_in_date} />
+      <DetailRow label="Check-out" value={b.check_out_date} />
+      {b.nights !== null && <DetailRow label="Nights" value={String(b.nights)} />}
+      <DetailRow label="Booking ref" value={b.booking_ref} />
+    </>
+  );
+}
+
+function OtherDetails({ b }: { b: Extract<ParsedBooking, { type: 'other' }> }) {
+  return (
+    <>
+      <DetailRow label="Description" value={b.description} />
+      <DetailRow label="City" value={b.city} />
+      <DetailRow label="Date" value={b.date} />
+    </>
+  );
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+export default function BookingPreviewSheet({
+  visible,
+  booking,
+  stops,
+  saving,
+  onSave,
+  onDiscard,
+}: Props) {
+  const insets = useSafeAreaInsets();
+  const slideAnim = useRef(new Animated.Value(0)).current;
+  const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
+  const [stopPickerOpen, setStopPickerOpen] = useState(false);
+
+  // Compute the best match whenever booking/stops change
+  const autoMatch = booking ? bestMatchStop(booking, stops) : null;
+  const effectiveStopId = selectedStopId ?? autoMatch?.id ?? null;
+  const selectedStop = stops.find((s) => s.id === effectiveStopId) ?? autoMatch ?? null;
+
+  React.useEffect(() => {
+    // Reset selection when a new booking arrives
+    setSelectedStopId(null);
+    setStopPickerOpen(false);
+  }, [booking]);
+
+  React.useEffect(() => {
+    Animated.spring(slideAnim, {
+      toValue: visible ? 1 : 0,
+      useNativeDriver: true,
+      tension: 60,
+      friction: 12,
+    }).start();
+  }, [visible]);
+
+  const translateY = slideAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [600, 0],
+  });
+
+  if (!booking) return null;
+
+  return (
+    <Modal transparent visible={visible} animationType="none" onRequestClose={onDiscard}>
+      <TouchableWithoutFeedback onPress={saving ? undefined : onDiscard}>
+        <View style={styles.overlay} />
+      </TouchableWithoutFeedback>
+
+      <Animated.View
+        style={[
+          styles.sheet,
+          { transform: [{ translateY }], paddingBottom: insets.bottom + 16 },
+        ]}
+      >
+        {/* Handle */}
+        <View style={styles.handle} />
+
+        {/* Header */}
+        <View style={styles.sheetHeader}>
+          <View style={styles.typeIconWrap}>
+            <Feather name={bookingIcon(booking)} size={18} color={colors.primary} />
+          </View>
+          <Text style={styles.sheetTitle}>{bookingLabel(booking)} detected</Text>
+        </View>
+
+        <ScrollView showsVerticalScrollIndicator={false} style={styles.scrollArea}>
+          {/* Details card */}
+          <View style={styles.card}>
+            {booking.type === 'flight' && <FlightDetails b={booking} />}
+            {booking.type === 'accommodation' && <AccommodationDetails b={booking} />}
+            {booking.type === 'other' && <OtherDetails b={booking} />}
+          </View>
+
+          {/* Stop assignment */}
+          <Text style={styles.sectionLabel}>Save to stop</Text>
+          <TouchableOpacity
+            style={styles.stopSelector}
+            activeOpacity={0.7}
+            onPress={() => setStopPickerOpen((o) => !o)}
+            disabled={saving}
+          >
+            <View style={styles.stopSelectorLeft}>
+              <Feather name="map-pin" size={15} color={colors.primary} />
+              <Text style={styles.stopSelectorText}>
+                {selectedStop
+                  ? `${selectedStop.city} · ${selectedStop.tripName}`
+                  : 'No stop selected'}
+              </Text>
+            </View>
+            <Feather
+              name={stopPickerOpen ? 'chevron-up' : 'chevron-down'}
+              size={16}
+              color={colors.textMuted}
+            />
+          </TouchableOpacity>
+
+          {stopPickerOpen && (
+            <View style={styles.stopList}>
+              <TouchableOpacity
+                style={styles.stopRow}
+                activeOpacity={0.7}
+                onPress={() => { setSelectedStopId(null); setStopPickerOpen(false); }}
+              >
+                <Text style={[styles.stopRowText, !effectiveStopId && styles.stopRowTextActive]}>
+                  None
+                </Text>
+              </TouchableOpacity>
+              {stops.map((s) => (
+                <TouchableOpacity
+                  key={s.id}
+                  style={styles.stopRow}
+                  activeOpacity={0.7}
+                  onPress={() => { setSelectedStopId(s.id); setStopPickerOpen(false); }}
+                >
+                  <Text style={[styles.stopRowText, s.id === effectiveStopId && styles.stopRowTextActive]}>
+                    {s.city}
+                  </Text>
+                  <Text style={styles.stopRowMeta}>{s.tripName}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
+        </ScrollView>
+
+        {/* Actions */}
+        <View style={styles.actions}>
+          <Pressable
+            style={({ pressed }) => [styles.discardButton, pressed && styles.pressed]}
+            onPress={onDiscard}
+            disabled={saving}
+          >
+            <Text style={styles.discardText}>Discard</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.saveButton, pressed && styles.pressed, saving && styles.saveButtonDisabled]}
+            onPress={() => onSave(booking, effectiveStopId)}
+            disabled={saving}
+          >
+            {saving ? (
+              <ActivityIndicator size="small" color={colors.white} />
+            ) : (
+              <Text style={styles.saveText}>Save booking</Text>
+            )}
+          </Pressable>
+        </View>
+      </Animated.View>
+    </Modal>
+  );
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const styles = StyleSheet.create({
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  sheet: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 12,
+    paddingHorizontal: 20,
+    maxHeight: '85%',
+  },
+  handle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.border,
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 16,
+  },
+  typeIconWrap: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#EBF3F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 20,
+    color: colors.text,
+    letterSpacing: -0.2,
+  },
+  scrollArea: {
+    flexGrow: 0,
+  },
+  card: {
+    backgroundColor: colors.background,
+    borderRadius: 14,
+    padding: 14,
+    gap: 8,
+    marginBottom: 20,
+  },
+  routeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  routeCity: {
+    fontFamily: fonts.displayBold,
+    fontSize: 18,
+    color: colors.text,
+    letterSpacing: -0.2,
+  },
+  routeArrow: {
+    marginHorizontal: 8,
+  },
+  detailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  detailLabel: {
+    fontFamily: fonts.bodyBold,
+    fontSize: 12,
+    color: colors.textMuted,
+    letterSpacing: 0.2,
+    minWidth: 80,
+  },
+  detailValue: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    color: colors.text,
+    flex: 1,
+    textAlign: 'right',
+  },
+  sectionLabel: {
+    fontFamily: fonts.bodyBold,
+    fontSize: 11,
+    color: colors.textMuted,
+    letterSpacing: 1.0,
+    textTransform: 'uppercase',
+    marginBottom: 8,
+  },
+  stopSelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.background,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  stopSelectorLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  stopSelectorText: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    color: colors.text,
+    flex: 1,
+  },
+  stopList: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: 8,
+    overflow: 'hidden',
+  },
+  stopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  stopRowText: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    color: colors.text,
+  },
+  stopRowTextActive: {
+    fontFamily: fonts.bodyBold,
+    color: colors.primary,
+  },
+  stopRowMeta: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    color: colors.textMuted,
+  },
+  actions: {
+    flexDirection: 'row',
+    gap: 12,
+    paddingTop: 16,
+  },
+  pressed: { opacity: 0.75 },
+  discardButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  discardText: {
+    fontFamily: fonts.bodyBold,
+    fontSize: 15,
+    color: colors.textMuted,
+  },
+  saveButton: {
+    flex: 2,
+    paddingVertical: 14,
+    borderRadius: 14,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveButtonDisabled: {
+    opacity: 0.7,
+  },
+  saveText: {
+    fontFamily: fonts.bodyBold,
+    fontSize: 15,
+    color: colors.white,
+  },
+});

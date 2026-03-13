@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
-  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -22,6 +21,27 @@ import { useAuth } from '@/hooks/useAuth';
 
 type Mode = 'signin' | 'signup';
 
+// ─── Error mapping ────────────────────────────────────────────────────────────
+
+function mapAuthError(err: any): string {
+  const msg: string = err?.message ?? '';
+  if (msg.includes('Invalid login credentials'))
+    return 'Incorrect email or password. Please try again.';
+  if (msg.includes('Email not confirmed'))
+    return 'Please verify your email address before signing in.';
+  if (msg.includes('User already registered'))
+    return 'An account with this email already exists. Try signing in instead.';
+  if (msg.includes('Password should be at least') || msg.includes('password'))
+    return 'Password must be at least 6 characters.';
+  if (msg.includes('Unable to validate email address') || msg.includes('valid email'))
+    return 'Please enter a valid email address.';
+  if (msg.includes('rate limit') || msg.includes('too many requests'))
+    return 'Too many attempts. Please wait a moment and try again.';
+  return msg || 'Something went wrong. Please try again.';
+}
+
+// ─── Screen ───────────────────────────────────────────────────────────────────
+
 export default function LoginScreen() {
   const router = useRouter();
   const { signInWithEmail, signUpWithEmail, signInWithApple, signInWithGoogle } = useAuth();
@@ -29,27 +49,52 @@ export default function LoginScreen() {
   const [mode, setMode] = useState<Mode>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
   const [loadingEmail, setLoadingEmail] = useState(false);
   const [loadingApple, setLoadingApple] = useState(false);
   const [loadingGoogle, setLoadingGoogle] = useState(false);
 
+  const passwordRef = useRef<TextInput>(null);
+  const confirmPasswordRef = useRef<TextInput>(null);
+
   const anyLoading = loadingEmail || loadingApple || loadingGoogle;
 
+  function clearError() {
+    if (errorMessage) setErrorMessage('');
+  }
+
   async function handleEmailAuth() {
+    setErrorMessage('');
+
+    // ── Client-side validation ─────────────────────────────────────────
     if (!email.trim() || !password.trim()) {
-      Alert.alert('Missing fields', 'Please enter your email and password.');
+      setErrorMessage('Please enter your email and password.');
       return;
     }
+    if (mode === 'signup') {
+      if (password.length < 8) {
+        setErrorMessage('Password must be at least 8 characters.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setErrorMessage("Passwords don't match.");
+        return;
+      }
+    }
+
+    // ── API call ───────────────────────────────────────────────────────
     setLoadingEmail(true);
     try {
       if (mode === 'signin') {
         await signInWithEmail(email.trim(), password);
       } else {
         await signUpWithEmail(email.trim(), password);
+        // On success the auth state change listener in _layout.tsx routes to /(main)/
       }
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Something went wrong. Please try again.');
+      setErrorMessage(mapAuthError(err));
     } finally {
       setLoadingEmail(false);
     }
@@ -60,9 +105,8 @@ export default function LoginScreen() {
     try {
       await signInWithApple();
     } catch (err: any) {
-      // Silently ignore user-cancelled Apple sign-in
       if (err?.code !== '1001') {
-        Alert.alert('Error', err?.message ?? 'Apple sign-in failed.');
+        setErrorMessage(mapAuthError(err));
       }
     } finally {
       setLoadingApple(false);
@@ -74,7 +118,7 @@ export default function LoginScreen() {
     try {
       await signInWithGoogle();
     } catch (err: any) {
-      Alert.alert('Error', err?.message ?? 'Google sign-in failed.');
+      setErrorMessage(mapAuthError(err));
     } finally {
       setLoadingGoogle(false);
     }
@@ -83,6 +127,8 @@ export default function LoginScreen() {
   function toggleMode() {
     setMode(mode === 'signin' ? 'signup' : 'signin');
     setPassword('');
+    setConfirmPassword('');
+    setErrorMessage('');
   }
 
   return (
@@ -98,7 +144,7 @@ export default function LoginScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Back / header */}
+          {/* Back */}
           <Pressable style={styles.backButton} onPress={() => router.back()} hitSlop={12}>
             <Text style={styles.backLabel}>← Back</Text>
           </Pressable>
@@ -115,7 +161,7 @@ export default function LoginScreen() {
             </Text>
           </View>
 
-          {/* Social sign-in */}
+          {/* Social */}
           <View style={styles.socialGroup}>
             {Platform.OS === 'ios' && (
               <SocialButton
@@ -135,24 +181,28 @@ export default function LoginScreen() {
 
           <Divider label="or continue with email" />
 
-          {/* Email / password form */}
+          {/* Form */}
           <View style={styles.form}>
+            {/* Email */}
             <View style={styles.field}>
               <Text style={styles.fieldLabel}>Email</Text>
               <TextInput
                 style={styles.input}
                 value={email}
-                onChangeText={setEmail}
+                onChangeText={(v) => { setEmail(v); clearError(); }}
                 placeholder="you@example.com"
                 placeholderTextColor={colors.textMuted}
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
                 autoComplete="email"
+                returnKeyType="next"
+                onSubmitEditing={() => passwordRef.current?.focus()}
                 editable={!anyLoading}
               />
             </View>
 
+            {/* Password */}
             <View style={styles.field}>
               <View style={styles.fieldLabelRow}>
                 <Text style={styles.fieldLabel}>Password</Text>
@@ -164,13 +214,20 @@ export default function LoginScreen() {
               </View>
               <View style={styles.passwordContainer}>
                 <TextInput
+                  ref={passwordRef}
                   style={[styles.input, styles.passwordInput]}
                   value={password}
-                  onChangeText={setPassword}
+                  onChangeText={(v) => { setPassword(v); clearError(); }}
                   placeholder={mode === 'signin' ? '••••••••' : 'At least 8 characters'}
                   placeholderTextColor={colors.textMuted}
                   secureTextEntry={!showPassword}
                   autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+                  returnKeyType={mode === 'signup' ? 'next' : 'done'}
+                  onSubmitEditing={
+                    mode === 'signup'
+                      ? () => confirmPasswordRef.current?.focus()
+                      : handleEmailAuth
+                  }
                   editable={!anyLoading}
                 />
                 <Pressable
@@ -182,6 +239,33 @@ export default function LoginScreen() {
                 </Pressable>
               </View>
             </View>
+
+            {/* Confirm password — signup only */}
+            {mode === 'signup' && (
+              <View style={styles.field}>
+                <Text style={styles.fieldLabel}>Confirm password</Text>
+                <View style={styles.passwordContainer}>
+                  <TextInput
+                    ref={confirmPasswordRef}
+                    style={[styles.input, styles.passwordInput]}
+                    value={confirmPassword}
+                    onChangeText={(v) => { setConfirmPassword(v); clearError(); }}
+                    placeholder="Re-enter your password"
+                    placeholderTextColor={colors.textMuted}
+                    secureTextEntry={!showPassword}
+                    autoComplete="new-password"
+                    returnKeyType="done"
+                    onSubmitEditing={handleEmailAuth}
+                    editable={!anyLoading}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* Inline error */}
+            {errorMessage ? (
+              <Text style={styles.errorMessage}>{errorMessage}</Text>
+            ) : null}
 
             <Button
               label={mode === 'signin' ? 'Sign In' : 'Create Account'}
@@ -215,6 +299,8 @@ export default function LoginScreen() {
     </SafeAreaView>
   );
 }
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
   container: {
@@ -309,6 +395,13 @@ const styles = StyleSheet.create({
     fontFamily: fonts.body,
     fontSize: 13,
     color: colors.primary,
+  },
+  errorMessage: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    color: colors.error,
+    lineHeight: 20,
+    marginTop: -4, // tighten the gap slightly so it reads as attached to the form
   },
   toggleRow: {
     flexDirection: 'row',
