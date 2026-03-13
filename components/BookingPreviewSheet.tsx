@@ -15,7 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
-import type { ParsedBooking } from '@/lib/claude';
+import type { ParsedBooking, TransportBooking } from '@/lib/claude';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,32 +38,51 @@ interface Props {
 
 function bestMatchStop(booking: ParsedBooking, stops: StopOption[]): StopOption | null {
   const targetCity =
-    booking.type === 'flight'
+    booking.type === 'transport'
       ? booking.destination_city
       : booking.type === 'accommodation'
       ? booking.city
       : booking.city;
-
   if (!targetCity) return null;
   const needle = targetCity.toLowerCase().trim();
   return stops.find((s) => s.city.toLowerCase().trim() === needle) ?? null;
 }
 
+function transportLabel(b: TransportBooking): string {
+  switch (b.transport_type) {
+    case 'train':  return 'Train';
+    case 'bus':    return 'Bus';
+    case 'ferry':  return 'Ferry';
+    default:       return 'Flight';
+  }
+}
+
 function bookingLabel(booking: ParsedBooking): string {
-  if (booking.type === 'flight') return 'Flight';
+  if (booking.type === 'transport')     return transportLabel(booking);
   if (booking.type === 'accommodation') return 'Accommodation';
   return 'Document';
 }
 
-function bookingIcon(booking: ParsedBooking): React.ComponentProps<typeof Feather>['name'] {
-  if (booking.type === 'flight') return 'send';
+type FeatherName = React.ComponentProps<typeof Feather>['name'];
+
+export function transportIcon(transport_type: string): FeatherName {
+  switch (transport_type) {
+    case 'train':  return 'bar-chart-2';
+    case 'bus':    return 'truck';
+    case 'ferry':  return 'anchor';
+    default:       return 'send';
+  }
+}
+
+function bookingIcon(booking: ParsedBooking): FeatherName {
+  if (booking.type === 'transport')     return transportIcon(booking.transport_type);
   if (booking.type === 'accommodation') return 'home';
   return 'file-text';
 }
 
 // ─── Detail rows ──────────────────────────────────────────────────────────────
 
-function DetailRow({ label, value }: { label: string; value: string | null }) {
+function DetailRow({ label, value }: { label: string; value: string | null | undefined }) {
   if (!value) return null;
   return (
     <View style={styles.detailRow}>
@@ -73,7 +92,11 @@ function DetailRow({ label, value }: { label: string; value: string | null }) {
   );
 }
 
-function FlightDetails({ b }: { b: Extract<ParsedBooking, { type: 'flight' }> }) {
+function TransportDetails({ b }: { b: TransportBooking }) {
+  const serviceLabel =
+    b.transport_type === 'flight' ? 'Flight' :
+    b.transport_type === 'train'  ? 'Train no.' : 'Service';
+
   return (
     <>
       <View style={styles.routeRow}>
@@ -81,12 +104,26 @@ function FlightDetails({ b }: { b: Extract<ParsedBooking, { type: 'flight' }> })
         <Feather name="arrow-right" size={14} color={colors.textMuted} style={styles.routeArrow} />
         <Text style={styles.routeCity}>{b.destination_city || '—'}</Text>
       </View>
-      <DetailRow label="Airline" value={b.airline} />
-      <DetailRow label="Flight" value={b.flight_number} />
-      <DetailRow label="Departure" value={b.departure_date ? `${b.departure_date} ${b.departure_time}` : null} />
-      <DetailRow label="Arrival" value={b.arrival_date ? `${b.arrival_date} ${b.arrival_time}` : null} />
+      <DetailRow label="Operator"    value={b.operator} />
+      <DetailRow label={serviceLabel} value={b.service_number} />
+      <DetailRow label="Departure"   value={b.departure_date ? `${b.departure_date}  ${b.departure_time}` : null} />
+      <DetailRow label="Arrival"     value={b.arrival_date ? `${b.arrival_date}  ${b.arrival_time}` : null} />
       <DetailRow label="Booking ref" value={b.booking_ref} />
-      <DetailRow label="Seat" value={b.seat} />
+      <DetailRow label="Seat"        value={b.seat} />
+      {/* Flight */}
+      <DetailRow label="Gate"        value={b.gate} />
+      <DetailRow label="Terminal"    value={b.terminal} />
+      {/* Train */}
+      <DetailRow label="Coach"         value={b.coach} />
+      <DetailRow label="Platform"      value={b.platform} />
+      <DetailRow label="From station"  value={b.origin_station} />
+      <DetailRow label="To station"    value={b.destination_station} />
+      {/* Bus */}
+      <DetailRow label="Pickup"      value={b.pickup_point} />
+      {/* Ferry */}
+      <DetailRow label="Deck"          value={b.deck} />
+      <DetailRow label="Cabin"         value={b.cabin} />
+      <DetailRow label="Port/terminal" value={b.port_terminal} />
     </>
   );
 }
@@ -94,10 +131,10 @@ function FlightDetails({ b }: { b: Extract<ParsedBooking, { type: 'flight' }> })
 function AccommodationDetails({ b }: { b: Extract<ParsedBooking, { type: 'accommodation' }> }) {
   return (
     <>
-      <DetailRow label="Property" value={b.hotel_name} />
-      <DetailRow label="City" value={b.city} />
-      <DetailRow label="Check-in" value={b.check_in_date} />
-      <DetailRow label="Check-out" value={b.check_out_date} />
+      <DetailRow label="Property"    value={b.hotel_name} />
+      <DetailRow label="City"        value={b.city} />
+      <DetailRow label="Check-in"    value={b.check_in_date} />
+      <DetailRow label="Check-out"   value={b.check_out_date} />
       {b.nights !== null && <DetailRow label="Nights" value={String(b.nights)} />}
       <DetailRow label="Booking ref" value={b.booking_ref} />
     </>
@@ -108,8 +145,8 @@ function OtherDetails({ b }: { b: Extract<ParsedBooking, { type: 'other' }> }) {
   return (
     <>
       <DetailRow label="Description" value={b.description} />
-      <DetailRow label="City" value={b.city} />
-      <DetailRow label="Date" value={b.date} />
+      <DetailRow label="City"        value={b.city} />
+      <DetailRow label="Date"        value={b.date} />
     </>
   );
 }
@@ -117,25 +154,18 @@ function OtherDetails({ b }: { b: Extract<ParsedBooking, { type: 'other' }> }) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function BookingPreviewSheet({
-  visible,
-  booking,
-  stops,
-  saving,
-  onSave,
-  onDiscard,
+  visible, booking, stops, saving, onSave, onDiscard,
 }: Props) {
   const insets = useSafeAreaInsets();
   const slideAnim = useRef(new Animated.Value(0)).current;
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [stopPickerOpen, setStopPickerOpen] = useState(false);
 
-  // Compute the best match whenever booking/stops change
   const autoMatch = booking ? bestMatchStop(booking, stops) : null;
   const effectiveStopId = selectedStopId ?? autoMatch?.id ?? null;
   const selectedStop = stops.find((s) => s.id === effectiveStopId) ?? autoMatch ?? null;
 
   React.useEffect(() => {
-    // Reset selection when a new booking arrives
     setSelectedStopId(null);
     setStopPickerOpen(false);
   }, [booking]);
@@ -168,10 +198,8 @@ export default function BookingPreviewSheet({
           { transform: [{ translateY }], paddingBottom: insets.bottom + 16 },
         ]}
       >
-        {/* Handle */}
         <View style={styles.handle} />
 
-        {/* Header */}
         <View style={styles.sheetHeader}>
           <View style={styles.typeIconWrap}>
             <Feather name={bookingIcon(booking)} size={18} color={colors.primary} />
@@ -180,14 +208,12 @@ export default function BookingPreviewSheet({
         </View>
 
         <ScrollView showsVerticalScrollIndicator={false} style={styles.scrollArea}>
-          {/* Details card */}
           <View style={styles.card}>
-            {booking.type === 'flight' && <FlightDetails b={booking} />}
+            {booking.type === 'transport'     && <TransportDetails b={booking} />}
             {booking.type === 'accommodation' && <AccommodationDetails b={booking} />}
-            {booking.type === 'other' && <OtherDetails b={booking} />}
+            {booking.type === 'other'         && <OtherDetails b={booking} />}
           </View>
 
-          {/* Stop assignment */}
           <Text style={styles.sectionLabel}>Save to stop</Text>
           <TouchableOpacity
             style={styles.stopSelector}
@@ -238,7 +264,6 @@ export default function BookingPreviewSheet({
           )}
         </ScrollView>
 
-        {/* Actions */}
         <View style={styles.actions}>
           <Pressable
             style={({ pressed }) => [styles.discardButton, pressed && styles.pressed]}
@@ -248,7 +273,11 @@ export default function BookingPreviewSheet({
             <Text style={styles.discardText}>Discard</Text>
           </Pressable>
           <Pressable
-            style={({ pressed }) => [styles.saveButton, pressed && styles.pressed, saving && styles.saveButtonDisabled]}
+            style={({ pressed }) => [
+              styles.saveButton,
+              pressed && styles.pressed,
+              saving && styles.saveButtonDisabled,
+            ]}
             onPress={() => onSave(booking, effectiveStopId)}
             disabled={saving}
           >
@@ -267,190 +296,66 @@ export default function BookingPreviewSheet({
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-  },
+  overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)' },
   sheet: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
+    position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: colors.white,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingTop: 12,
-    paddingHorizontal: 20,
-    maxHeight: '85%',
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingTop: 12, paddingHorizontal: 20, maxHeight: '85%',
   },
   handle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: colors.border,
-    alignSelf: 'center',
-    marginBottom: 16,
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, alignSelf: 'center', marginBottom: 16,
   },
-  sheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 16,
-  },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 16 },
   typeIconWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#EBF3F6',
-    alignItems: 'center',
-    justifyContent: 'center',
+    width: 38, height: 38, borderRadius: 19,
+    backgroundColor: '#EBF3F6', alignItems: 'center', justifyContent: 'center',
   },
-  sheetTitle: {
-    fontFamily: fonts.displayBold,
-    fontSize: 20,
-    color: colors.text,
-    letterSpacing: -0.2,
-  },
-  scrollArea: {
-    flexGrow: 0,
-  },
-  card: {
-    backgroundColor: colors.background,
-    borderRadius: 14,
-    padding: 14,
-    gap: 8,
-    marginBottom: 20,
-  },
-  routeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  routeCity: {
-    fontFamily: fonts.displayBold,
-    fontSize: 18,
-    color: colors.text,
-    letterSpacing: -0.2,
-  },
-  routeArrow: {
-    marginHorizontal: 8,
-  },
-  detailRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    gap: 12,
-  },
-  detailLabel: {
-    fontFamily: fonts.bodyBold,
-    fontSize: 12,
-    color: colors.textMuted,
-    letterSpacing: 0.2,
-    minWidth: 80,
-  },
-  detailValue: {
-    fontFamily: fonts.body,
-    fontSize: 14,
-    color: colors.text,
-    flex: 1,
-    textAlign: 'right',
-  },
+  sheetTitle: { fontFamily: fonts.displayBold, fontSize: 20, color: colors.text, letterSpacing: -0.2 },
+  scrollArea: { flexGrow: 0 },
+  card: { backgroundColor: colors.background, borderRadius: 14, padding: 14, gap: 8, marginBottom: 20 },
+  routeRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
+  routeCity: { fontFamily: fonts.displayBold, fontSize: 18, color: colors.text, letterSpacing: -0.2 },
+  routeArrow: { marginHorizontal: 8 },
+  detailRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
+  detailLabel: { fontFamily: fonts.bodyBold, fontSize: 12, color: colors.textMuted, letterSpacing: 0.2, minWidth: 80 },
+  detailValue: { fontFamily: fonts.body, fontSize: 14, color: colors.text, flex: 1, textAlign: 'right' },
   sectionLabel: {
-    fontFamily: fonts.bodyBold,
-    fontSize: 11,
-    color: colors.textMuted,
-    letterSpacing: 1.0,
-    textTransform: 'uppercase',
-    marginBottom: 8,
+    fontFamily: fonts.bodyBold, fontSize: 11, color: colors.textMuted,
+    letterSpacing: 1.0, textTransform: 'uppercase', marginBottom: 8,
   },
   stopSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: colors.background,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 4,
-    borderWidth: 1,
-    borderColor: colors.border,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: colors.background, borderRadius: 12, padding: 14,
+    marginBottom: 4, borderWidth: 1, borderColor: colors.border,
   },
-  stopSelectorLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flex: 1,
-  },
-  stopSelectorText: {
-    fontFamily: fonts.body,
-    fontSize: 14,
-    color: colors.text,
-    flex: 1,
-  },
+  stopSelectorLeft: { flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 },
+  stopSelectorText: { fontFamily: fonts.body, fontSize: 14, color: colors.text, flex: 1 },
   stopList: {
-    backgroundColor: colors.white,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-    marginBottom: 8,
-    overflow: 'hidden',
+    backgroundColor: colors.white, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.border, marginBottom: 8, overflow: 'hidden',
   },
   stopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 14, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
   },
-  stopRowText: {
-    fontFamily: fonts.body,
-    fontSize: 14,
-    color: colors.text,
-  },
-  stopRowTextActive: {
-    fontFamily: fonts.bodyBold,
-    color: colors.primary,
-  },
-  stopRowMeta: {
-    fontFamily: fonts.body,
-    fontSize: 12,
-    color: colors.textMuted,
-  },
-  actions: {
-    flexDirection: 'row',
-    gap: 12,
-    paddingTop: 16,
-  },
+  stopRowText: { fontFamily: fonts.body, fontSize: 14, color: colors.text },
+  stopRowTextActive: { fontFamily: fonts.bodyBold, color: colors.primary },
+  stopRowMeta: { fontFamily: fonts.body, fontSize: 12, color: colors.textMuted },
+  actions: { flexDirection: 'row', gap: 12, paddingTop: 16 },
   pressed: { opacity: 0.75 },
   discardButton: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
+    flex: 1, paddingVertical: 14, borderRadius: 14,
+    borderWidth: 1.5, borderColor: colors.border,
+    alignItems: 'center', justifyContent: 'center',
   },
-  discardText: {
-    fontFamily: fonts.bodyBold,
-    fontSize: 15,
-    color: colors.textMuted,
-  },
+  discardText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.textMuted },
   saveButton: {
-    flex: 2,
-    paddingVertical: 14,
-    borderRadius: 14,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
+    flex: 2, paddingVertical: 14, borderRadius: 14,
+    backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center',
   },
-  saveButtonDisabled: {
-    opacity: 0.7,
-  },
-  saveText: {
-    fontFamily: fonts.bodyBold,
-    fontSize: 15,
-    color: colors.white,
-  },
+  saveButtonDisabled: { opacity: 0.7 },
+  saveText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.white },
 });

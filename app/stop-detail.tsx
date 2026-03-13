@@ -2,10 +2,12 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,8 +19,16 @@ import * as DocumentPicker from 'expo-document-picker';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
-import { parsePdfBooking, readUriAsBase64, type ParsedBooking, type FlightBooking, type AccommodationBooking } from '@/lib/claude';
-import BookingPreviewSheet, { type StopOption } from '@/components/BookingPreviewSheet';
+import {
+  parseBookingFile,
+  readUriAsBase64,
+  mediaTypeFromUri,
+  type ParsedBooking,
+  type TransportBooking,
+  type AccommodationBooking,
+} from '@/lib/claude';
+import BookingPreviewSheet, { transportIcon, type StopOption } from '@/components/BookingPreviewSheet';
+import ManualTransportSheet from '@/components/ManualTransportSheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -119,14 +129,15 @@ function PlaceholderTab({ label }: { label: string }) {
 
 // ─── Saved booking cards ──────────────────────────────────────────────────────
 
-function SavedFlightCard({ booking, onPress }: { booking: FlightBooking; onPress: () => void }) {
+function SavedTransportCard({ booking, onPress }: { booking: TransportBooking; onPress: () => void }) {
+  const icon = transportIcon(booking.transport_type);
   return (
     <Pressable
       style={({ pressed }) => [styles.savedCard, pressed && styles.savedCardPressed]}
       onPress={onPress}
     >
       <View style={styles.savedCardIconWrap}>
-        <Feather name="send" size={16} color={colors.primary} />
+        <Feather name={icon} size={16} color={colors.primary} />
       </View>
       <View style={styles.savedCardBody}>
         <View style={styles.savedCardTitleRow}>
@@ -141,8 +152,8 @@ function SavedFlightCard({ booking, onPress }: { booking: FlightBooking; onPress
         </View>
         <Text style={styles.savedCardMeta}>
           {[
-            booking.airline,
-            booking.flight_number,
+            booking.operator,
+            booking.service_number,
             booking.departure_date ? shortDate(booking.departure_date) : null,
             booking.departure_time || null,
             booking.seat ? `Seat ${booking.seat}` : null,
@@ -217,7 +228,7 @@ function UploadCard({
           )}
         </View>
         <View style={styles.uploadCardBody}>
-          <Text style={styles.uploadCardTitle}>{loading ? 'Parsing PDF…' : title}</Text>
+          <Text style={styles.uploadCardTitle}>{loading ? 'Parsing…' : title}</Text>
           <Text style={styles.uploadCardSubtitle}>{loading ? 'This may take a moment' : subtitle}</Text>
         </View>
         {!loading && <Feather name="plus" size={18} color={colors.primary} />}
@@ -231,12 +242,65 @@ function UploadCard({
   );
 }
 
+// ─── Transport source picker modal ────────────────────────────────────────────
+
+function TransportSourceModal({
+  visible,
+  onUpload,
+  onManual,
+  onClose,
+}: {
+  visible: boolean;
+  onUpload: () => void;
+  onManual: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal transparent visible={visible} animationType="fade" onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={onClose}>
+        <View style={styles.sourceOverlay} />
+      </TouchableWithoutFeedback>
+      <View style={styles.sourceSheet}>
+        <View style={styles.sourceHandle} />
+        <Text style={styles.sourceTitle}>Add transport</Text>
+        <Pressable
+          style={({ pressed }) => [styles.sourceOption, pressed && styles.sourceOptionPressed]}
+          onPress={() => { onClose(); onUpload(); }}
+        >
+          <View style={styles.sourceOptionIcon}>
+            <Feather name="upload" size={18} color={colors.primary} />
+          </View>
+          <View style={styles.sourceOptionBody}>
+            <Text style={styles.sourceOptionTitle}>Upload a file</Text>
+            <Text style={styles.sourceOptionSub}>PDF, JPG or PNG booking confirmation</Text>
+          </View>
+          <Feather name="chevron-right" size={16} color={colors.textMuted} />
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [styles.sourceOption, pressed && styles.sourceOptionPressed]}
+          onPress={() => { onClose(); onManual(); }}
+        >
+          <View style={styles.sourceOptionIcon}>
+            <Feather name="edit-2" size={18} color={colors.primary} />
+          </View>
+          <View style={styles.sourceOptionBody}>
+            <Text style={styles.sourceOptionTitle}>Enter manually</Text>
+            <Text style={styles.sourceOptionSub}>Type in booking details yourself</Text>
+          </View>
+          <Feather name="chevron-right" size={16} color={colors.textMuted} />
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
 // ─── Dev test fixtures ────────────────────────────────────────────────────────
 
 const DEV_FLIGHT: ParsedBooking = {
-  type: 'flight',
-  airline: 'Thai Airways',
-  flight_number: 'TG661',
+  type: 'transport',
+  transport_type: 'flight',
+  operator: 'Thai Airways',
+  service_number: 'TG661',
   origin_city: 'Bangkok',
   destination_city: 'Chiang Mai',
   departure_date: '2025-04-02',
@@ -245,6 +309,29 @@ const DEV_FLIGHT: ParsedBooking = {
   arrival_time: '10:25',
   booking_ref: 'XK9A4T',
   seat: '14A',
+  gate: 'B7', terminal: 'T1',
+  coach: null, platform: null, origin_station: null, destination_station: null,
+  pickup_point: null,
+  deck: null, cabin: null, port_terminal: null,
+};
+
+const DEV_TRAIN: ParsedBooking = {
+  type: 'transport',
+  transport_type: 'train',
+  operator: 'Eurostar',
+  service_number: '9001',
+  origin_city: 'London',
+  destination_city: 'Paris',
+  departure_date: '2025-04-10',
+  departure_time: '08:31',
+  arrival_date: '2025-04-10',
+  arrival_time: '11:47',
+  booking_ref: 'ES-88472',
+  seat: '42C',
+  gate: null, terminal: null,
+  coach: 'Coach 3', platform: '5', origin_station: 'St Pancras International', destination_station: 'Paris Gare du Nord',
+  pickup_point: null,
+  deck: null, cabin: null, port_terminal: null,
 };
 
 const DEV_ACCOMMODATION: ParsedBooking = {
@@ -261,24 +348,26 @@ const DEV_ACCOMMODATION: ParsedBooking = {
 
 function LogisticsTab({
   savedBookings,
-  onPickFlight,
+  onPickTransport,
   onPickAccommodation,
   onDevFlight,
+  onDevTrain,
   onDevAccommodation,
-  parsingFlight,
+  parsingTransport,
   parsingAccommodation,
   onBookingPress,
 }: {
   savedBookings: SavedBookingItem[];
-  onPickFlight: () => void;
+  onPickTransport: () => void;
   onPickAccommodation: () => void;
   onDevFlight: () => void;
+  onDevTrain: () => void;
   onDevAccommodation: () => void;
-  parsingFlight: boolean;
+  parsingTransport: boolean;
   parsingAccommodation: boolean;
   onBookingPress: (booking: SavedBookingItem) => void;
 }) {
-  const flights = savedBookings.filter((b): b is SavedBookingItem & FlightBooking => b.type === 'flight');
+  const transports = savedBookings.filter((b): b is SavedBookingItem & TransportBooking => b.type === 'transport');
   const accommodations = savedBookings.filter((b): b is SavedBookingItem & AccommodationBooking => b.type === 'accommodation');
 
   return (
@@ -287,12 +376,12 @@ function LogisticsTab({
       contentContainerStyle={styles.logisticsContent}
       showsVerticalScrollIndicator={false}
     >
-      {/* Saved flights */}
-      {flights.length > 0 && (
+      {/* Saved transport */}
+      {transports.length > 0 && (
         <>
-          <Text style={styles.logisticsSectionLabel}>Flights</Text>
-          {flights.map((b, i) => (
-            <SavedFlightCard key={i} booking={b} onPress={() => onBookingPress(b)} />
+          <Text style={styles.logisticsSectionLabel}>Transport</Text>
+          {transports.map((b, i) => (
+            <SavedTransportCard key={i} booking={b} onPress={() => onBookingPress(b)} />
           ))}
         </>
       )}
@@ -300,7 +389,7 @@ function LogisticsTab({
       {/* Saved accommodation */}
       {accommodations.length > 0 && (
         <>
-          <Text style={[styles.logisticsSectionLabel, flights.length > 0 && styles.sectionLabelSpaced]}>
+          <Text style={[styles.logisticsSectionLabel, transports.length > 0 && styles.sectionLabelSpaced]}>
             Accommodation
           </Text>
           {accommodations.map((b, i) => (
@@ -315,12 +404,17 @@ function LogisticsTab({
       </Text>
       <UploadCard
         icon="send"
-        title="Add flight"
-        subtitle="Upload a flight confirmation PDF"
-        loading={parsingFlight}
-        onPress={onPickFlight}
+        title="Add transport"
+        subtitle="Upload a booking confirmation"
+        loading={parsingTransport}
+        onPress={onPickTransport}
         onDevTest={onDevFlight}
       />
+      {__DEV__ && (
+        <Pressable style={[styles.devButton, { alignSelf: 'flex-end', marginTop: -4, marginBottom: 8 }]} onPress={onDevTrain}>
+          <Text style={styles.devButtonText}>DEV: inject train data</Text>
+        </Pressable>
+      )}
       <UploadCard
         icon="home"
         title="Add accommodation"
@@ -346,8 +440,12 @@ export default function StopDetailScreen() {
   // Saved bookings shown in the Logistics tab
   const [savedBookings, setSavedBookings] = useState<SavedBookingItem[]>([]);
 
-  // PDF parsing state
-  const [parsingFlight, setParsingFlight] = useState(false);
+  // Transport source picker
+  const [sourcePickerVisible, setSourcePickerVisible] = useState(false);
+  const [manualSheetVisible, setManualSheetVisible] = useState(false);
+
+  // PDF/image parsing state
+  const [parsingTransport, setParsingTransport] = useState(false);
   const [parsingAccommodation, setParsingAccommodation] = useState(false);
   const [parsedBooking, setParsedBooking] = useState<ParsedBooking | null>(null);
   const [previewVisible, setPreviewVisible] = useState(false);
@@ -417,7 +515,7 @@ export default function StopDetailScreen() {
       });
     }
 
-    // Flights: leg_bookings for legs terminating at this stop
+    // Transport: leg_bookings for legs terminating at this stop
     const { data: inboundLegs, error: legErr } = await supabase
       .from('legs')
       .select('id, from_stop:from_stop_id(city)')
@@ -441,9 +539,10 @@ export default function StopDetailScreen() {
         items.push({
           _dbId: lb.id,
           _source: 'leg_bookings',
-          type: 'flight',
-          airline: lb.operator ?? '',
-          flight_number: lb.reference ?? '',
+          type: 'transport',
+          transport_type: 'flight', // legacy leg_bookings don't store transport_type
+          operator: lb.operator ?? '',
+          service_number: lb.reference ?? '',
           origin_city: leg?.from_stop?.city ?? '',
           destination_city: stopData.city,
           departure_date: '',
@@ -452,30 +551,35 @@ export default function StopDetailScreen() {
           arrival_time: '',
           booking_ref: lb.confirmation_ref ?? '',
           seat: lb.seat ?? null,
+          gate: null, terminal: null,
+          coach: null, platform: null, origin_station: null, destination_station: null,
+          pickup_point: null,
+          deck: null, cabin: null, port_terminal: null,
         });
       }
     }
 
-    // Fallback flights saved to saved_items (no matching leg at save time)
-    const { data: savedFlights, error: sfErr } = await supabase
+    // Fallback transport saved to saved_items (no matching leg at save time)
+    const { data: savedTransports, error: sfErr } = await supabase
       .from('saved_items')
       .select('id, note')
       .eq('stop_id', stopData.id)
       .eq('creator_id', userId)
       .eq('category', 'Transport');
 
-    if (sfErr) console.warn('[logistics] saved_items flight fetch error:', sfErr.message);
+    if (sfErr) console.warn('[logistics] saved_items transport fetch error:', sfErr.message);
 
-    for (const sf of savedFlights ?? []) {
+    for (const sf of savedTransports ?? []) {
       try {
         const parsed = JSON.parse((sf as any).note ?? '{}');
-        if (!parsed.origin_city && !parsed.airline) continue; // not our JSON format
+        if (!parsed.origin_city) continue; // not our JSON format
         items.push({
           _dbId: (sf as any).id,
           _source: 'saved_items',
-          type: 'flight',
-          airline: parsed.airline ?? '',
-          flight_number: parsed.flight_number ?? '',
+          type: 'transport',
+          transport_type: parsed.transport_type ?? 'flight',
+          operator: parsed.operator ?? parsed.airline ?? '',
+          service_number: parsed.service_number ?? parsed.flight_number ?? '',
           origin_city: parsed.origin_city ?? '',
           destination_city: parsed.destination_city ?? '',
           departure_date: parsed.departure_date ?? '',
@@ -484,6 +588,11 @@ export default function StopDetailScreen() {
           arrival_time: parsed.arrival_time ?? '',
           booking_ref: parsed.booking_ref ?? '',
           seat: parsed.seat ?? null,
+          gate: parsed.gate ?? null, terminal: parsed.terminal ?? null,
+          coach: parsed.coach ?? null, platform: parsed.platform ?? null,
+          origin_station: parsed.origin_station ?? null, destination_station: parsed.destination_station ?? null,
+          pickup_point: parsed.pickup_point ?? null,
+          deck: parsed.deck ?? null, cabin: parsed.cabin ?? null, port_terminal: parsed.port_terminal ?? null,
         });
       } catch {
         // note wasn't our JSON — skip
@@ -511,20 +620,22 @@ export default function StopDetailScreen() {
     });
   }
 
-  // ── PDF pick + parse ───────────────────────────────────────────────────────
+  // ── File pick + parse ──────────────────────────────────────────────────────
 
-  async function handlePickPdf(type: 'flight' | 'accommodation') {
-    const setter = type === 'flight' ? setParsingFlight : setParsingAccommodation;
+  async function handlePickFile(bookingType: 'transport' | 'accommodation') {
+    const setter = bookingType === 'transport' ? setParsingTransport : setParsingAccommodation;
     setter(true);
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: 'application/pdf',
+        type: ['application/pdf', 'image/jpeg', 'image/png'],
         copyToCacheDirectory: true,
       });
       if (result.canceled) return;
 
-      const base64 = await readUriAsBase64(result.assets[0].uri);
-      const booking = await parsePdfBooking(base64);
+      const asset = result.assets[0];
+      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
+      const base64 = await readUriAsBase64(asset.uri);
+      const booking = await parseBookingFile(base64, mediaType);
       setParsedBooking(booking);
       setPreviewVisible(true);
     } catch (err: any) {
@@ -551,11 +662,10 @@ export default function StopDetailScreen() {
           confirmation_ref: booking.booking_ref || null,
           check_in_date: booking.check_in_date || null,
           check_out_date: booking.check_out_date || null,
-          // check_in / check_out are time-of-day fields, left empty until user fills them
         });
         if (insertErr) throw new Error(insertErr.message);
 
-      } else if (booking.type === 'flight') {
+      } else if (booking.type === 'transport') {
         // Try to find the inbound leg for this stop
         const { data: inboundLegs } = await supabase
           .from('legs')
@@ -569,21 +679,26 @@ export default function StopDetailScreen() {
           const { error: lbErr } = await supabase.from('leg_bookings').insert({
             leg_id: matchedLeg.id,
             owner_id: userId,
-            operator: booking.airline,
-            reference: booking.flight_number,
+            operator: booking.operator,
+            reference: booking.service_number,
             seat: booking.seat,
             confirmation_ref: booking.booking_ref,
           });
           if (lbErr) throw new Error(lbErr.message);
         } else {
+          const transportLabel = booking.transport_type === 'flight' ? booking.service_number
+            : booking.transport_type === 'train' ? `Train ${booking.service_number}`
+            : booking.transport_type === 'bus' ? `Bus ${booking.service_number}`
+            : `Ferry ${booking.service_number}`;
           const { error: siErr } = await supabase.from('saved_items').insert({
             stop_id: selectedStopId ?? stop?.id ?? null,
             creator_id: userId,
-            name: `${booking.airline} ${booking.flight_number}`,
+            name: `${booking.operator} ${transportLabel}`.trim(),
             category: 'Transport',
             note: JSON.stringify({
-              airline: booking.airline,
-              flight_number: booking.flight_number,
+              transport_type: booking.transport_type,
+              operator: booking.operator,
+              service_number: booking.service_number,
               origin_city: booking.origin_city,
               destination_city: booking.destination_city,
               departure_date: booking.departure_date,
@@ -592,6 +707,16 @@ export default function StopDetailScreen() {
               arrival_time: booking.arrival_time,
               booking_ref: booking.booking_ref,
               seat: booking.seat,
+              gate: booking.gate,
+              terminal: booking.terminal,
+              coach: booking.coach,
+              platform: booking.platform,
+              origin_station: booking.origin_station,
+              destination_station: booking.destination_station,
+              pickup_point: booking.pickup_point,
+              deck: booking.deck,
+              cabin: booking.cabin,
+              port_terminal: booking.port_terminal,
             }),
           });
           if (siErr) throw new Error(siErr.message);
@@ -611,6 +736,7 @@ export default function StopDetailScreen() {
       if (stop) await loadSavedBookings(stop);
 
       setPreviewVisible(false);
+      setManualSheetVisible(false);
       setParsedBooking(null);
     } catch (err: any) {
       console.error('[handleSave] error:', err?.message);
@@ -688,11 +814,12 @@ export default function StopDetailScreen() {
       {activeTab === 'Logistics' && (
         <LogisticsTab
           savedBookings={savedBookings}
-          onPickFlight={() => handlePickPdf('flight')}
-          onPickAccommodation={() => handlePickPdf('accommodation')}
+          onPickTransport={() => setSourcePickerVisible(true)}
+          onPickAccommodation={() => handlePickFile('accommodation')}
           onDevFlight={() => { setParsedBooking(DEV_FLIGHT); setPreviewVisible(true); }}
+          onDevTrain={() => { setParsedBooking(DEV_TRAIN); setPreviewVisible(true); }}
           onDevAccommodation={() => { setParsedBooking(DEV_ACCOMMODATION); setPreviewVisible(true); }}
-          parsingFlight={parsingFlight}
+          parsingTransport={parsingTransport}
           parsingAccommodation={parsingAccommodation}
           onBookingPress={handleBookingPress}
         />
@@ -700,6 +827,24 @@ export default function StopDetailScreen() {
       {activeTab === 'Days' && <PlaceholderTab label="Days" />}
       {activeTab === 'Saved' && <PlaceholderTab label="Saved" />}
 
+      {/* Transport source picker */}
+      <TransportSourceModal
+        visible={sourcePickerVisible}
+        onUpload={() => handlePickFile('transport')}
+        onManual={() => setManualSheetVisible(true)}
+        onClose={() => setSourcePickerVisible(false)}
+      />
+
+      {/* Manual transport entry */}
+      <ManualTransportSheet
+        visible={manualSheetVisible}
+        stops={[stopOption]}
+        saving={saving}
+        onSave={handleSave}
+        onDiscard={() => setManualSheetVisible(false)}
+      />
+
+      {/* AI-parsed booking preview */}
       <BookingPreviewSheet
         visible={previewVisible}
         booking={parsedBooking}
@@ -816,6 +961,36 @@ const styles = StyleSheet.create({
     borderRadius: 6, backgroundColor: '#FFE8A3',
   },
   devButtonText: { fontFamily: fonts.body, fontSize: 11, color: '#7A5C00' },
+
+  // Transport source modal
+  sourceOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.35)' },
+  sourceSheet: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingTop: 12, paddingHorizontal: 20, paddingBottom: 40,
+  },
+  sourceHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: colors.border, alignSelf: 'center', marginBottom: 16,
+  },
+  sourceTitle: {
+    fontFamily: fonts.displayBold, fontSize: 20,
+    color: colors.text, letterSpacing: -0.2, marginBottom: 16,
+  },
+  sourceOption: {
+    flexDirection: 'row', alignItems: 'center', gap: 14,
+    backgroundColor: colors.background, borderRadius: 14, padding: 16, marginBottom: 10,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  sourceOptionPressed: { opacity: 0.8 },
+  sourceOptionIcon: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: '#EBF3F6', alignItems: 'center', justifyContent: 'center',
+  },
+  sourceOptionBody: { flex: 1 },
+  sourceOptionTitle: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.text, marginBottom: 2 },
+  sourceOptionSub: { fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
 
   placeholderWrap: {
     flex: 1, alignItems: 'center', justifyContent: 'center',

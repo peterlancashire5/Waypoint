@@ -19,7 +19,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
-import { parsePdfBooking, readUriAsBase64, type ParsedBooking } from '@/lib/claude';
+import { parseBookingFile, mediaTypeFromUri, readUriAsBase64, type ParsedBooking } from '@/lib/claude';
 import BookingPreviewSheet, { type StopOption } from '@/components/BookingPreviewSheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -276,19 +276,21 @@ export default function InboxScreen() {
     setSheetVisible(false);
   }
 
-  // ── PDF upload ────────────────────────────────────────────────────────────
+  // ── File upload ───────────────────────────────────────────────────────────
 
   async function handleUploadBooking() {
     setParsing(true);
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: 'application/pdf',
+        type: ['application/pdf', 'image/jpeg', 'image/png'],
         copyToCacheDirectory: true,
       });
       if (result.canceled) return;
 
-      const base64 = await readUriAsBase64(result.assets[0].uri);
-      const booking = await parsePdfBooking(base64);
+      const asset = result.assets[0];
+      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
+      const base64 = await readUriAsBase64(asset.uri);
+      const booking = await parseBookingFile(base64, mediaType);
       setParsedBooking(booking);
       setPreviewVisible(true);
     } catch (err: any) {
@@ -314,8 +316,7 @@ export default function InboxScreen() {
           name: booking.hotel_name,
           confirmation_ref: booking.booking_ref || null,
         });
-      } else if (booking.type === 'flight' && stopId) {
-        const matchedStop = allStops.find((s) => s.id === stopId);
+      } else if (booking.type === 'transport' && stopId) {
         const { data: legs } = await supabase
           .from('legs')
           .select('id, trip_id, to_stop:to_stop_id(city)')
@@ -329,8 +330,8 @@ export default function InboxScreen() {
           await supabase.from('leg_bookings').insert({
             leg_id: matchedLeg.id,
             owner_id: userId,
-            operator: booking.airline,
-            reference: booking.flight_number,
+            operator: booking.operator,
+            reference: booking.service_number,
             seat: booking.seat,
             confirmation_ref: booking.booking_ref,
           });
@@ -338,9 +339,21 @@ export default function InboxScreen() {
           await supabase.from('saved_items').insert({
             stop_id: stopId,
             creator_id: userId,
-            name: `${booking.airline} ${booking.flight_number}`,
+            name: `${booking.operator} ${booking.service_number}`.trim(),
             category: 'Transport',
-            note: `Flight ${booking.origin_city} → ${booking.destination_city} on ${booking.departure_date}. Ref: ${booking.booking_ref}`,
+            note: JSON.stringify({
+              transport_type: booking.transport_type,
+              operator: booking.operator,
+              service_number: booking.service_number,
+              origin_city: booking.origin_city,
+              destination_city: booking.destination_city,
+              departure_date: booking.departure_date,
+              departure_time: booking.departure_time,
+              arrival_date: booking.arrival_date,
+              arrival_time: booking.arrival_time,
+              booking_ref: booking.booking_ref,
+              seat: booking.seat,
+            }),
           });
         }
       } else {
@@ -378,9 +391,10 @@ export default function InboxScreen() {
                 style={styles.devButton}
                 onPress={() => {
                   setParsedBooking({
-                    type: 'flight',
-                    airline: 'Thai Airways',
-                    flight_number: 'TG661',
+                    type: 'transport',
+                    transport_type: 'flight',
+                    operator: 'Thai Airways',
+                    service_number: 'TG661',
                     origin_city: 'Bangkok',
                     destination_city: 'Chiang Mai',
                     departure_date: '2025-04-02',
@@ -389,6 +403,10 @@ export default function InboxScreen() {
                     arrival_time: '10:25',
                     booking_ref: 'XK9A4T',
                     seat: '14A',
+                    gate: null, terminal: null,
+                    coach: null, platform: null, origin_station: null, destination_station: null,
+                    pickup_point: null,
+                    deck: null, cabin: null, port_terminal: null,
                   });
                   setPreviewVisible(true);
                 }}

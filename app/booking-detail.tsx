@@ -16,6 +16,8 @@ import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import { transportIcon } from '@/components/BookingPreviewSheet';
+import type { TransportType } from '@/lib/claude';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -51,11 +53,12 @@ interface FlightRecord {
   } | null;
 }
 
-// Saved_items-backed flight (no matched leg; structured JSON in note)
-interface SavedItemFlightRecord {
+// Saved_items-backed transport (no matched leg; structured JSON in note)
+interface SavedItemTransportRecord {
   id: string;
-  airline: string | null;
-  flight_number: string | null;
+  transport_type: TransportType;
+  operator: string | null;
+  service_number: string | null;
   origin_city: string | null;
   destination_city: string | null;
   departure_date: string | null;   // "YYYY-MM-DD"
@@ -387,17 +390,18 @@ function FlightDetail({
   );
 }
 
-// ─── Saved_items-backed flight detail ────────────────────────────────────────
+// ─── Saved_items-backed transport detail ─────────────────────────────────────
 
-function SavedItemFlightDetail({
+function SavedItemTransportDetail({
   record,
   onFieldSave,
 }: {
-  record: SavedItemFlightRecord;
-  onFieldSave: (field: keyof SavedItemFlightRecord, value: string) => void;
+  record: SavedItemTransportRecord;
+  onFieldSave: (field: keyof SavedItemTransportRecord, value: string) => void;
 }) {
   const fromCity = record.origin_city ?? '—';
   const toCity = record.destination_city ?? '—';
+  const icon = transportIcon(record.transport_type);
 
   return (
     <>
@@ -410,7 +414,7 @@ function SavedItemFlightDetail({
         </View>
         <View style={styles.routeMiddle}>
           <View style={styles.routeLine} />
-          <Feather name="send" size={14} color={colors.primary} style={styles.routeIcon} />
+          <Feather name={icon} size={14} color={colors.primary} style={styles.routeIcon} />
         </View>
         <View style={[styles.routeEndpoint, styles.routeEndpointRight]}>
           <Text style={styles.routeCity}>{toCity}</Text>
@@ -419,20 +423,20 @@ function SavedItemFlightDetail({
         </View>
       </View>
 
-      <SectionHeading label="Flight details" />
+      <SectionHeading label="Transport details" />
       <View style={styles.card}>
         <EditableRow
-          label="Airline / Operator"
-          value={record.airline}
+          label="Operator"
+          value={record.operator}
           placeholder="e.g. Thai Airways"
-          onSave={(v) => onFieldSave('airline', v)}
+          onSave={(v) => onFieldSave('operator', v)}
         />
         <View style={styles.divider} />
         <EditableRow
-          label="Flight number"
-          value={record.flight_number}
+          label="Service number"
+          value={record.service_number}
           placeholder="e.g. TG661"
-          onSave={(v) => onFieldSave('flight_number', v)}
+          onSave={(v) => onFieldSave('service_number', v)}
         />
         <View style={styles.divider} />
         <EditableRow
@@ -475,7 +479,7 @@ function SavedItemFlightDetail({
 export default function BookingDetailScreen() {
   const router = useRouter();
   const { type, id, source } = useLocalSearchParams<{
-    type: 'flight' | 'accommodation';
+    type: 'transport' | 'accommodation';
     id: string;
     source: 'accommodation' | 'leg_bookings' | 'saved_items';
   }>();
@@ -486,7 +490,7 @@ export default function BookingDetailScreen() {
 
   const [accommodation, setAccommodation] = useState<AccommodationRecord | null>(null);
   const [flight, setFlight] = useState<FlightRecord | null>(null);
-  const [savedItemFlight, setSavedItemFlight] = useState<SavedItemFlightRecord | null>(null);
+  const [savedItemTransport, setSavedItemTransport] = useState<SavedItemTransportRecord | null>(null);
 
   // ── Fetch record ────────────────────────────────────────────────────────────
 
@@ -510,21 +514,22 @@ export default function BookingDetailScreen() {
           setAccommodation(data as unknown as AccommodationRecord);
         }
       } else if (source === 'saved_items') {
-        // Flight stored as JSON in saved_items.note
+        // Transport stored as JSON in saved_items.note
         const { data, error: fetchErr } = await supabase
           .from('saved_items')
           .select('id, note')
           .eq('id', id)
           .single();
         if (fetchErr || !data) {
-          setError('Could not load flight details.');
+          setError('Could not load transport details.');
         } else {
           try {
             const parsed = JSON.parse((data as any).note ?? '{}');
-            setSavedItemFlight({
+            setSavedItemTransport({
               id: (data as any).id,
-              airline: parsed.airline ?? null,
-              flight_number: parsed.flight_number ?? null,
+              transport_type: parsed.transport_type ?? 'flight',
+              operator: parsed.operator ?? parsed.airline ?? null,
+              service_number: parsed.service_number ?? parsed.flight_number ?? null,
               origin_city: parsed.origin_city ?? null,
               destination_city: parsed.destination_city ?? null,
               departure_date: parsed.departure_date ?? null,
@@ -535,7 +540,7 @@ export default function BookingDetailScreen() {
               seat: parsed.seat ?? null,
             });
           } catch {
-            setError('Could not parse flight details.');
+            setError('Could not parse transport details.');
           }
         }
       } else {
@@ -590,13 +595,14 @@ export default function BookingDetailScreen() {
     setFlight((prev) => prev ? { ...prev, [field]: storedValue } : prev);
   }
 
-  async function saveSavedItemFlightField(field: keyof SavedItemFlightRecord, value: string) {
-    if (!savedItemFlight) return;
+  async function saveSavedItemTransportField(field: keyof SavedItemTransportRecord, value: string) {
+    if (!savedItemTransport) return;
     const storedValue = value === '' ? null : value;
-    const updated = { ...savedItemFlight, [field]: storedValue };
+    const updated = { ...savedItemTransport, [field]: storedValue };
     const note = JSON.stringify({
-      airline: updated.airline,
-      flight_number: updated.flight_number,
+      transport_type: updated.transport_type,
+      operator: updated.operator,
+      service_number: updated.service_number,
       origin_city: updated.origin_city,
       destination_city: updated.destination_city,
       departure_date: updated.departure_date,
@@ -606,22 +612,22 @@ export default function BookingDetailScreen() {
       booking_ref: updated.booking_ref,
       seat: updated.seat,
     });
-    const name = [updated.airline, updated.flight_number].filter(Boolean).join(' ') || 'Flight';
+    const name = [updated.operator, updated.service_number].filter(Boolean).join(' ') || 'Transport';
     const { error: updateErr } = await supabase
       .from('saved_items')
       .update({ note, name })
-      .eq('id', savedItemFlight.id);
+      .eq('id', savedItemTransport.id);
     if (updateErr) {
       Alert.alert('Could not save', updateErr.message);
       return;
     }
-    setSavedItemFlight(updated);
+    setSavedItemTransport(updated);
   }
 
   // ── Delete booking ──────────────────────────────────────────────────────────
 
   function handleDeletePress() {
-    const label = type === 'accommodation' ? 'accommodation booking' : 'flight booking';
+    const label = type === 'accommodation' ? 'accommodation booking' : 'transport booking';
     Alert.alert(
       `Delete ${label}`,
       'This will permanently remove this booking. Are you sure?',
@@ -657,9 +663,9 @@ export default function BookingDetailScreen() {
 
   function getTitle(): string {
     if (type === 'accommodation') return accommodation?.name || 'Accommodation';
-    if (savedItemFlight) {
-      const from = savedItemFlight.origin_city ?? '—';
-      const to = savedItemFlight.destination_city ?? '—';
+    if (savedItemTransport) {
+      const from = savedItemTransport.origin_city ?? '—';
+      const to = savedItemTransport.destination_city ?? '—';
       return `${from} → ${to}`;
     }
     const from = flight?.leg?.from_stop?.city ?? '—';
@@ -669,8 +675,8 @@ export default function BookingDetailScreen() {
 
   function getSubtitle(): string | null {
     if (type === 'accommodation') return null;
-    if (savedItemFlight) {
-      return [savedItemFlight.airline, savedItemFlight.flight_number].filter(Boolean).join(' · ') || null;
+    if (savedItemTransport) {
+      return [savedItemTransport.operator, savedItemTransport.service_number].filter(Boolean).join(' · ') || null;
     }
     return [flight?.operator, flight?.reference].filter(Boolean).join(' · ') || null;
   }
@@ -686,7 +692,7 @@ export default function BookingDetailScreen() {
     );
   }
 
-  if (error || (!accommodation && !flight && !savedItemFlight)) {
+  if (error || (!accommodation && !flight && !savedItemTransport)) {
     return (
       <View style={styles.container}>
         <StatusBar style="dark" />
@@ -741,16 +747,16 @@ export default function BookingDetailScreen() {
             onFieldSave={saveAccommodationField}
           />
         )}
-        {type === 'flight' && flight && (
+        {type === 'transport' && flight && (
           <FlightDetail
             record={flight}
             onFieldSave={saveFlightField}
           />
         )}
-        {type === 'flight' && savedItemFlight && (
-          <SavedItemFlightDetail
-            record={savedItemFlight}
-            onFieldSave={saveSavedItemFlightField}
+        {type === 'transport' && savedItemTransport && (
+          <SavedItemTransportDetail
+            record={savedItemTransport}
+            onFieldSave={saveSavedItemTransportField}
           />
         )}
 
@@ -770,7 +776,7 @@ export default function BookingDetailScreen() {
               <>
                 <Feather name="trash-2" size={16} color={colors.error} />
                 <Text style={styles.deleteButtonText}>
-                  Delete {type === 'accommodation' ? 'accommodation' : 'flight booking'}
+                  Delete {type === 'accommodation' ? 'accommodation' : 'transport booking'}
                 </Text>
               </>
             )}
