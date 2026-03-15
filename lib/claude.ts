@@ -1,4 +1,6 @@
 import { File, Paths } from 'expo-file-system';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import type { PlaceCategory } from './placesEnrichment';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -95,6 +97,25 @@ export type ParsedBooking = TransportBooking | AccommodationBooking | OtherBooki
 // Keep the old name exported so any remaining references don't break at runtime
 export type FlightBooking = TransportBooking;
 
+/** A place recommendation extracted from a screenshot, photo, or social post. */
+export interface PlaceResult {
+  type: 'place';
+  /** content_type discriminator — always "place" for this shape. */
+  content_type: 'place';
+  name: string;
+  category: PlaceCategory;
+  city: string | null;
+  /** Any description, review snippet, or details visible in the image. */
+  note: string | null;
+}
+
+/**
+ * Union of everything the AI parser may return.
+ * Check `parsed.type === 'place'` to branch into the place-saving flow;
+ * all other type values are booking confirmations.
+ */
+export type ParsedContent = ParsedBooking | PlaceResult;
+
 // ─── Media type helpers ───────────────────────────────────────────────────────
 
 export type BookingMediaType = 'application/pdf' | 'image/jpeg' | 'image/png';
@@ -123,22 +144,99 @@ export async function readUriAsBase64(uri: string): Promise<string> {
   }
 }
 
+// ─── Image resize ─────────────────────────────────────────────────────────────
+
+const IMAGE_RESIZE_THRESHOLD = 4 * 1024 * 1024; // 4 MB — resize anything larger
+const IMAGE_MAX_WIDTH = 1500;
+const IMAGE_COMPRESS_QUALITY = 0.7;
+
+/**
+ * Checks the byte size of a local image URI via fetch. If it exceeds
+ * IMAGE_RESIZE_THRESHOLD (4 MB), resizes it to max 1500px wide at JPEG 0.7
+ * using expo-image-manipulator and returns the new URI + updated media type.
+ * Returns the original URI unchanged for PDFs or images already under the limit.
+ */
+async function maybeShrinkImage(
+  uri: string,
+  mediaType: BookingMediaType,
+): Promise<{ uri: string; mediaType: BookingMediaType }> {
+  if (mediaType === 'application/pdf') return { uri, mediaType };
+
+  try {
+    const resp = await fetch(uri);
+    const blob = await resp.blob();
+    if (blob.size <= IMAGE_RESIZE_THRESHOLD) return { uri, mediaType };
+  } catch {
+    // Can't determine size — proceed without resizing rather than failing.
+    return { uri, mediaType };
+  }
+
+  const result = await manipulateAsync(
+    uri,
+    [{ resize: { width: IMAGE_MAX_WIDTH } }],
+    { compress: IMAGE_COMPRESS_QUALITY, format: SaveFormat.JPEG },
+  );
+  return { uri: result.uri, mediaType: 'image/jpeg' };
+}
+
+/**
+ * Convenience: resize the image if needed, then read as base64.
+ * Use this instead of the `readUriAsBase64` + manual mediaType pair at every call site.
+ */
+export async function readAndPrepareBase64(
+  uri: string,
+  mediaType: BookingMediaType,
+): Promise<{ base64: string; mediaType: BookingMediaType }> {
+  const { uri: finalUri, mediaType: finalMediaType } = await maybeShrinkImage(uri, mediaType);
+  const base64 = await readUriAsBase64(finalUri);
+  return { base64, mediaType: finalMediaType };
+}
+
 // ─── API call ─────────────────────────────────────────────────────────────────
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-opus-4-6';
 
-const SYSTEM_PROMPT = `You are a travel booking parser. Extract structured data from booking confirmation documents (PDFs or images).
+const SYSTEM_PROMPT = `You are a travel document and place parser. Given a PDF or image, first decide whether it is:
 
-Return ONLY valid JSON (no markdown, no explanation) in one of these exact formats:
+A) A booking confirmation (flight, train, bus, ferry, accommodation)
+B) A place recommendation (restaurant, bar, café, museum, attraction, shop, activity, etc.)
+   — this includes screenshots from Google Maps, Instagram, TikTok, TripAdvisor, travel blogs,
+     and photos of restaurants, venues, or signs.
+
+Return ONLY valid JSON (no markdown, no explanation).
+
+━━━ PLACE RECOMMENDATION ━━━
+
+If the image/document shows a place recommendation, return:
+{"content_type":"place","type":"place","name":"...","category":"Restaurants","city":"...","note":"..."}
+
+category must be exactly one of: "Restaurants", "Bars", "Museums", "Activities", "Sights", "Shopping", "Other"
+- "Restaurants" — restaurant, café, bakery, food stall, takeaway
+- "Bars" — bar, pub, cocktail lounge, nightclub, wine bar
+- "Museums" — museum, gallery, exhibition space
+- "Activities" — tour, experience, sport, theme park, spa, cooking class, boat trip
+- "Sights" — landmark, monument, church, temple, viewpoint, historic site, nature spot
+- "Shopping" — shop, market, boutique, mall, souvenir store
+- "Other" — anything else
+
+name = the venue name (extract from text, logo, or map pin — even a partial name is useful)
+city = city where the place is located (null if not visible)
+note = any description, review snippet, cuisine type, price range, opening hours, or tips visible in the image (null if nothing useful)
+
+If the image is a photo of food or a building with minimal identifying text, still try to extract whatever is visible. A partial name is better than nothing.
+
+━━━ BOOKING CONFIRMATION ━━━
+
+For booking confirmations, always include "content_type":"booking" alongside the existing "type" field.
 
 Single transport booking:
-{"type":"transport","transport_type":"flight","operator":"...","service_number":"...","origin_city":"...","destination_city":"...","departure_date":"YYYY-MM-DD","departure_time":"HH:MM","arrival_date":"YYYY-MM-DD","arrival_time":"HH:MM","booking_ref":"...","seat":null,"gate":null,"terminal":null,"coach":null,"platform":null,"origin_station":null,"destination_station":null,"pickup_point":null,"dropoff_point":null,"deck":null,"cabin":null,"port_terminal":null}
+{"content_type":"booking","type":"transport","transport_type":"flight","operator":"...","service_number":"...","origin_city":"...","destination_city":"...","departure_date":"YYYY-MM-DD","departure_time":"HH:MM","arrival_date":"YYYY-MM-DD","arrival_time":"HH:MM","booking_ref":"...","seat":null,"gate":null,"terminal":null,"coach":null,"platform":null,"origin_station":null,"destination_station":null,"pickup_point":null,"dropoff_point":null,"deck":null,"cabin":null,"port_terminal":null}
 
 Connection/layover booking (two or more legs on one itinerary):
-{"type":"connection","is_connection":true,"booking_ref":"...","legs":[{"transport_type":"flight","operator":"...","service_number":"...","origin_city":"...","destination_city":"...","departure_date":"YYYY-MM-DD","departure_time":"HH:MM","arrival_date":"YYYY-MM-DD","arrival_time":"HH:MM","seat":null,"gate":null,"terminal":null,"coach":null,"platform":null,"origin_station":null,"destination_station":null,"pickup_point":null,"dropoff_point":null,"deck":null,"cabin":null,"port_terminal":null,"leg_order":1},{"leg_order":2,...}]}
+{"content_type":"booking","type":"connection","is_connection":true,"booking_ref":"...","legs":[{"transport_type":"flight","operator":"...","service_number":"...","origin_city":"...","destination_city":"...","departure_date":"YYYY-MM-DD","departure_time":"HH:MM","arrival_date":"YYYY-MM-DD","arrival_time":"HH:MM","seat":null,"gate":null,"terminal":null,"coach":null,"platform":null,"origin_station":null,"destination_station":null,"pickup_point":null,"dropoff_point":null,"deck":null,"cabin":null,"port_terminal":null,"leg_order":1},{"leg_order":2,...}]}
 
-Use the connection format when the document shows a multi-leg journey with a layover or connection — e.g. LHR→FRA→BKK on one booking, or a train journey with a required change. Each leg gets its own origin/destination, service number, and times. leg_order starts at 1.
+Use the connection format when the document shows a multi-leg journey with a layover or connection. leg_order starts at 1.
 
 Detect transport_type from context clues:
 - "flight": airline name, boarding pass, airport, gate, terminal, IATA flight number (e.g. BA123, TG661)
@@ -149,29 +247,24 @@ Detect transport_type from context clues:
 operator = company name (e.g. "Thai Airways", "Eurostar", "FlixBus", "Brittany Ferries")
 service_number = the service identifier (flight number, train number, route number)
 origin_city / destination_city = city names only, not airport/station codes
-pickup_point / dropoff_point = bus boarding and alighting locations (stop name, address, or terminal)
-origin_station / destination_station = train station names (e.g. "London St Pancras", "Paris Gare du Nord")
-platform = train platform number; coach = train coach/carriage number
-gate / terminal = flight gate and terminal identifiers
-deck / cabin / port_terminal = ferry-specific details
-Populate only the fields relevant to the detected type; set irrelevant fields to null.
+Populate only the fields relevant to the detected transport type; set irrelevant fields to null.
 
 Accommodation booking:
-{"type":"accommodation","hotel_name":"...","address":"full street address or null","city":"...","check_in_date":"YYYY-MM-DD","check_out_date":"YYYY-MM-DD","check_in_time":"HH:MM or null","check_out_time":"HH:MM or null","booking_ref":"...","nights":null,"wifi_name":null,"wifi_password":null}
+{"content_type":"booking","type":"accommodation","hotel_name":"...","address":"full street address or null","city":"...","check_in_date":"YYYY-MM-DD","check_out_date":"YYYY-MM-DD","check_in_time":"HH:MM or null","check_out_time":"HH:MM or null","booking_ref":"...","nights":null,"wifi_name":null,"wifi_password":null}
 
-address = full street address of the property (e.g. "Cankarjevo Nabrezje 27, Ljubljana, Slovenia"). Include street, number, and city/country if present. Set to null only if no address appears in the document.
-check_in_time / check_out_time = time of day in 24h HH:MM format (e.g. "14:00" for 2:00 PM, "11:00" for 11:00 AM). Convert 12h AM/PM to 24h. Set to null if not shown in the document.
-wifi_name / wifi_password = Wi-Fi credentials if present in the document (some Airbnb and hotel confirmations include these). Set to null if not shown.
+address = full street address (e.g. "Cankarjevo Nabrezje 27, Ljubljana, Slovenia"). Set to null only if absent.
+check_in_time / check_out_time = 24h HH:MM. Convert 12h AM/PM. Null if not shown.
+wifi_name / wifi_password = Wi-Fi credentials if present. Null if not shown.
 
-Other document:
-{"type":"other","description":"...","city":null,"date":null}
+Other document (booking-like but unrecognised):
+{"content_type":"booking","type":"other","description":"...","city":null,"date":null}
 
 Use null for any field you cannot determine.`;
 
 export async function parseBookingFile(
   base64: string,
   mediaType: BookingMediaType,
-): Promise<ParsedBooking> {
+): Promise<ParsedContent> {
   const apiKey = process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('Anthropic API key is not configured.');
 
@@ -224,7 +317,7 @@ export async function parseBookingFile(
   try {
     const raw = JSON.parse(text);
 
-    // Array response → normalise to ConnectionBooking
+    // Array response → normalise to ConnectionBooking (legacy model behaviour)
     if (Array.isArray(raw)) {
       const firstBookingRef = (raw[0] as any)?.booking_ref ?? null;
       const legs: ConnectionLeg[] = raw.map((item: any, i: number) => ({
@@ -232,13 +325,20 @@ export async function parseBookingFile(
         leg_order: item.leg_order ?? i + 1,
       }));
       return {
+        content_type: 'booking',
         type: 'connection',
         is_connection: true,
         booking_ref: firstBookingRef,
         legs,
-      } as ConnectionBooking;
+      } as ConnectionBooking & { content_type: 'booking' };
     }
 
+    // Place recommendation — pass through directly
+    if (raw.type === 'place') {
+      return raw as PlaceResult;
+    }
+
+    // All other shapes are booking confirmations
     return raw as ParsedBooking;
   } catch {
     throw new Error('Could not parse booking details from this document.');

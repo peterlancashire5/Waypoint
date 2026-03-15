@@ -13,6 +13,13 @@ import {
   TouchableWithoutFeedback,
   View,
 } from 'react-native';
+import {
+  fetchPlacesForStop,
+  savePlaceToStop,
+  type SavedPlace,
+} from '@/lib/savedPlaceUtils';
+import PlaceDetailSheet from '@/components/PlaceDetailSheet';
+import type { PlaceCategory } from '@/lib/placesEnrichment';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -25,9 +32,10 @@ import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
 import {
   parseBookingFile,
-  readUriAsBase64,
+  readAndPrepareBase64,
   mediaTypeFromUri,
   type ParsedBooking,
+  type ParsedContent,
   type TransportBooking,
   type AccommodationBooking,
 } from '@/lib/claude';
@@ -117,22 +125,34 @@ function buildHeaderMeta(stop: StopDetail): string {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function SegmentTabs({ active, onChange }: { active: string; onChange: (t: string) => void }) {
+function SegmentTabs({
+  active,
+  onChange,
+  savedCount,
+}: {
+  active: string;
+  onChange: (t: string) => void;
+  savedCount: number;
+}) {
   const tabs = ['Logistics', 'Days', 'Saved'];
   return (
     <View style={styles.segmentWrapper}>
       <View style={styles.segmentTrack}>
-        {tabs.map((tab) => (
-          <Pressable
-            key={tab}
-            style={[styles.segmentTab, active === tab && styles.segmentTabActive]}
-            onPress={() => onChange(tab)}
-          >
-            <Text style={[styles.segmentLabel, active === tab && styles.segmentLabelActive]}>
-              {tab}
-            </Text>
-          </Pressable>
-        ))}
+        {tabs.map((tab) => {
+          const label =
+            tab === 'Saved' && savedCount > 0 ? `Saved (${savedCount})` : tab;
+          return (
+            <Pressable
+              key={tab}
+              style={[styles.segmentTab, active === tab && styles.segmentTabActive]}
+              onPress={() => onChange(tab)}
+            >
+              <Text style={[styles.segmentLabel, active === tab && styles.segmentLabelActive]}>
+                {label}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
     </View>
   );
@@ -746,6 +766,344 @@ function LogisticsTab({
   );
 }
 
+// ─── Saved Places tab ─────────────────────────────────────────────────────────
+
+const PLACE_CATEGORIES: PlaceCategory[] = [
+  'Restaurants', 'Bars', 'Museums', 'Activities', 'Sights', 'Shopping', 'Other',
+];
+
+type CategoryConfig = {
+  icon: React.ComponentProps<typeof Feather>['name'];
+  iconBg: string;
+  iconColor: string;
+  badgeBg: string;
+  badgeText: string;
+};
+
+const CATEGORY_CONFIG: Record<PlaceCategory, CategoryConfig> = {
+  Restaurants: { icon: 'coffee',       iconBg: '#FBF0E8', iconColor: '#C07A4F', badgeBg: '#FBF0E8', badgeText: '#9A5C35' },
+  Bars:        { icon: 'sunset',       iconBg: '#EDECF8', iconColor: '#5B5EA6', badgeBg: '#EDECF8', badgeText: '#3F4280' },
+  Museums:     { icon: 'book-open',    iconBg: '#E8F2F5', iconColor: '#2C5F6E', badgeBg: '#E8F2F5', badgeText: '#2C5F6E' },
+  Activities:  { icon: 'compass',      iconBg: '#E6F3EC', iconColor: '#2E7D5A', badgeBg: '#E6F3EC', badgeText: '#1E5C3F' },
+  Sights:      { icon: 'camera',       iconBg: '#F8F0E0', iconColor: '#B07D2A', badgeBg: '#F8F0E0', badgeText: '#8A5F18' },
+  Shopping:    { icon: 'shopping-bag', iconBg: '#F5EBF3', iconColor: '#8B4F7A', badgeBg: '#F5EBF3', badgeText: '#6A3A5B' },
+  Other:       { icon: 'map-pin',      iconBg: '#EEECE9', iconColor: '#7A7570', badgeBg: '#EEECE9', badgeText: '#5A5550' },
+};
+
+// ── Place row ─────────────────────────────────────────────────────────────────
+
+function PlaceRow({ place, onPress }: { place: SavedPlace; onPress: () => void }) {
+  const cfg = place.category ? CATEGORY_CONFIG[place.category] : CATEGORY_CONFIG.Other;
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.placeRow, pressed && { opacity: 0.85 }]}
+      onPress={onPress}
+    >
+      <View style={[styles.placeIconWrap, { backgroundColor: cfg.iconBg }]}>
+        <Feather name={cfg.icon} size={16} color={cfg.iconColor} />
+      </View>
+      <View style={styles.placeRowBody}>
+        <Text style={styles.placeRowName} numberOfLines={1}>{place.name}</Text>
+        {!!place.note && (
+          <Text style={styles.placeRowNote} numberOfLines={2}>{place.note}</Text>
+        )}
+        {!place.note && !!place.address && (
+          <Text style={styles.placeRowNote} numberOfLines={1}>{place.address}</Text>
+        )}
+      </View>
+      {!!place.category && (
+        <View style={[styles.categoryBadge, { backgroundColor: cfg.badgeBg }]}>
+          <Text style={[styles.categoryBadgeText, { color: cfg.badgeText }]}>
+            {place.category}
+          </Text>
+        </View>
+      )}
+      <Feather name="chevron-right" size={16} color={colors.border} style={{ marginLeft: 4 }} />
+    </Pressable>
+  );
+}
+
+// ── Add place sheet ───────────────────────────────────────────────────────────
+
+function AddPlaceSheet({
+  visible,
+  stopId,
+  tripId,
+  onSaved,
+  onClose,
+}: {
+  visible: boolean;
+  stopId: string;
+  tripId: string;
+  onSaved: (place: SavedPlace) => void;
+  onClose: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const [name, setName] = useState('');
+  const [category, setCategory] = useState<PlaceCategory>('Restaurants');
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setName('');
+      setCategory('Restaurants');
+      setNote('');
+    }
+  }, [visible]);
+
+  async function handleSave() {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      Alert.alert('Name required', 'Please enter a place name.');
+      return;
+    }
+    setSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) throw new Error('Not authenticated.');
+
+      const place = await savePlaceToStop(
+        { name: trimmedName, category, city: null, note: note.trim() || null },
+        stopId,
+        tripId,
+        userId,
+      );
+      onSaved(place);
+      onClose();
+    } catch (err: any) {
+      Alert.alert('Could not save place', err?.message ?? 'Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!visible) return null;
+
+  return (
+    <Modal transparent visible animationType="slide" onRequestClose={onClose}>
+      <TouchableWithoutFeedback onPress={onClose}>
+        <View style={styles.sheetOverlay} />
+      </TouchableWithoutFeedback>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.kavWrapper}
+      >
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
+          <View style={styles.sheetHandle} />
+          <Text style={styles.sheetTitle}>Add place</Text>
+
+          {/* Name */}
+          <View style={[styles.datesCard, { marginBottom: 14 }]}>
+            <View style={styles.dateFieldRow}>
+              <Text style={styles.dateFieldLabel}>Name</Text>
+              <TextInput
+                style={styles.dateFieldInput}
+                value={name}
+                onChangeText={setName}
+                placeholder="e.g. Noma, Louvre, Zara"
+                placeholderTextColor={colors.border}
+                autoFocus
+                returnKeyType="next"
+              />
+            </View>
+          </View>
+
+          {/* Category chips */}
+          <Text style={styles.addPlaceFieldLabel}>Category</Text>
+          <View style={styles.categoryChipGrid}>
+            {PLACE_CATEGORIES.map((cat) => {
+              const selected = category === cat;
+              const cfg = CATEGORY_CONFIG[cat];
+              return (
+                <Pressable
+                  key={cat}
+                  style={[
+                    styles.categoryChipOption,
+                    selected && { backgroundColor: colors.primary, borderColor: colors.primary },
+                  ]}
+                  onPress={() => setCategory(cat)}
+                >
+                  <Feather
+                    name={cfg.icon}
+                    size={13}
+                    color={selected ? colors.white : cfg.iconColor}
+                    style={{ marginRight: 5 }}
+                  />
+                  <Text style={[
+                    styles.categoryChipOptionText,
+                    selected && { color: colors.white },
+                  ]}>
+                    {cat}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          {/* Note */}
+          <Text style={[styles.addPlaceFieldLabel, { marginTop: 14 }]}>Note (optional)</Text>
+          <View style={[styles.datesCard, { marginBottom: 20 }]}>
+            <TextInput
+              style={styles.noteInput}
+              value={note}
+              onChangeText={setNote}
+              placeholder="Cuisine, opening hours, tips…"
+              placeholderTextColor={colors.border}
+              multiline
+              returnKeyType="done"
+              blurOnSubmit
+            />
+          </View>
+
+          <View style={styles.sheetActions}>
+            <Pressable
+              style={({ pressed }) => [styles.sheetCancelBtn, pressed && { opacity: 0.7 }]}
+              onPress={onClose}
+            >
+              <Text style={styles.sheetCancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.sheetSaveBtn, pressed && { opacity: 0.85 }, saving && { opacity: 0.6 }]}
+              onPress={handleSave}
+              disabled={saving}
+            >
+              {saving
+                ? <ActivityIndicator size="small" color={colors.white} />
+                : <Text style={styles.sheetSaveText}>Save</Text>
+              }
+            </Pressable>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ── Saved tab ─────────────────────────────────────────────────────────────────
+
+const FILTER_OPTIONS = ['All', ...PLACE_CATEGORIES];
+
+function SavedTab({
+  places,
+  loading,
+  stopId,
+  tripId,
+}: {
+  places: SavedPlace[];
+  loading: boolean;
+  stopId: string;
+  tripId: string;
+  onPlaceAdded: (place: SavedPlace) => void;
+}) {
+  const [activeFilter, setActiveFilter] = useState<string>('All');
+  const [addSheetVisible, setAddSheetVisible] = useState(false);
+  const [localPlaces, setLocalPlaces] = useState<SavedPlace[]>(places);
+  const [selectedPlace, setSelectedPlace] = useState<SavedPlace | null>(null);
+  const [detailVisible, setDetailVisible] = useState(false);
+
+  // Sync when parent reloads
+  useEffect(() => { setLocalPlaces(places); }, [places]);
+
+  const filtered = activeFilter === 'All'
+    ? localPlaces
+    : localPlaces.filter((p) => p.category === activeFilter);
+
+  function handlePlacePress(place: SavedPlace) {
+    setSelectedPlace(place);
+    setDetailVisible(true);
+  }
+
+  return (
+    <View style={styles.flex1}>
+      {/* Filter chips */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.filterRow}
+        contentContainerStyle={styles.filterRowContent}
+      >
+        {FILTER_OPTIONS.map((opt) => {
+          const active = opt === activeFilter;
+          return (
+            <Pressable
+              key={opt}
+              style={[styles.filterChip, active && styles.filterChipActive]}
+              onPress={() => setActiveFilter(opt)}
+            >
+              <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
+                {opt}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+
+      {/* List */}
+      <ScrollView
+        style={styles.flex1}
+        contentContainerStyle={styles.savedPlacesContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {loading ? (
+          <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 40 }} />
+        ) : filtered.length === 0 ? (
+          <View style={styles.placesEmptyState}>
+            <Feather name="bookmark" size={32} color={colors.border} />
+            <Text style={styles.placesEmptyHeading}>No saved places yet</Text>
+            <Text style={styles.placesEmptyBody}>
+              Save a restaurant, bar, or sight from a screenshot
+            </Text>
+          </View>
+        ) : (
+          filtered.map((place) => (
+            <PlaceRow key={place.id} place={place} onPress={() => handlePlacePress(place)} />
+          ))
+        )}
+
+        {/* Add place manually */}
+        <Pressable
+          style={({ pressed }) => [styles.addPlaceButton, pressed && { opacity: 0.8 }]}
+          onPress={() => setAddSheetVisible(true)}
+        >
+          <Feather name="plus" size={15} color={colors.primary} style={{ marginRight: 6 }} />
+          <Text style={styles.addPlaceButtonText}>Add place manually</Text>
+        </Pressable>
+      </ScrollView>
+
+      <AddPlaceSheet
+        visible={addSheetVisible}
+        stopId={stopId}
+        tripId={tripId}
+        onSaved={(place) => setLocalPlaces((prev) => [place, ...prev])}
+        onClose={() => setAddSheetVisible(false)}
+      />
+
+      <PlaceDetailSheet
+        visible={detailVisible}
+        place={selectedPlace}
+        canMoveToInbox
+        onClose={() => setDetailVisible(false)}
+        onUpdated={(updated) => {
+          setLocalPlaces((prev) =>
+            prev.map((p) => (p.id === updated.id ? updated : p)),
+          );
+          setDetailVisible(false);
+        }}
+        onDeleted={(placeId) => {
+          setLocalPlaces((prev) => prev.filter((p) => p.id !== placeId));
+          setDetailVisible(false);
+        }}
+        onMoved={(placeId) => {
+          setLocalPlaces((prev) => prev.filter((p) => p.id !== placeId));
+          setDetailVisible(false);
+        }}
+      />
+    </View>
+  );
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function StopDetailScreen() {
@@ -758,6 +1116,10 @@ export default function StopDetailScreen() {
 
   // Saved bookings shown in the Logistics tab
   const [savedBookings, setSavedBookings] = useState<SavedBookingItem[]>([]);
+
+  // Saved places shown in the Saved tab
+  const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([]);
+  const [savedPlacesLoaded, setSavedPlacesLoaded] = useState(false);
 
   // All stops in the same trip (for the "Save to stop" dropdown)
   const [tripStops, setTripStops] = useState<StopOption[]>([]);
@@ -845,6 +1207,7 @@ export default function StopDetailScreen() {
       }
 
       await loadSavedBookings(stopData);
+      await loadSavedPlaces(stopData.id);
     };
     fetchAll();
   }, [stopId]);
@@ -1004,11 +1367,23 @@ export default function StopDetailScreen() {
     setSavedBookings(items);
   }
 
-  // Reload saved bookings on screen focus
+  async function loadSavedPlaces(sid: string) {
+    try {
+      const places = await fetchPlacesForStop(sid);
+      setSavedPlaces(places);
+    } catch (err: any) {
+      console.warn('[saved places] fetch error:', err?.message);
+    } finally {
+      setSavedPlacesLoaded(true);
+    }
+  }
+
+  // Reload saved bookings and places on screen focus
   useFocusEffect(
     useCallback(() => {
       if (!stop) return;
       loadSavedBookings(stop);
+      loadSavedPlaces(stop.id);
     }, [stop]),
   );
 
@@ -1099,10 +1474,14 @@ export default function StopDetailScreen() {
       if (result.canceled) return;
 
       const asset = result.assets[0];
-      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
-      const base64 = await readUriAsBase64(asset.uri);
-      const booking = await parseBookingFile(base64, mediaType);
-      setParsedBooking(booking);
+      const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
+      const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
+      const parsed: ParsedContent = await parseBookingFile(base64, mediaType);
+      if (parsed.type === 'place') {
+        Alert.alert('Place detected', 'Use the Quick Capture button to save places to your trip.');
+        return;
+      }
+      setParsedBooking(parsed);
       setPreviewVisible(true);
     } catch (err: any) {
       Alert.alert('Could not read booking', err?.message ?? 'Please try again.');
@@ -1127,10 +1506,14 @@ export default function StopDetailScreen() {
       });
       if (result.canceled) return;
       const asset = result.assets[0];
-      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
-      const base64 = await readUriAsBase64(asset.uri);
-      const booking = await parseBookingFile(base64, mediaType);
-      setParsedBooking(booking);
+      const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
+      const parsed: ParsedContent = await parseBookingFile(base64, mediaType);
+      if (parsed.type === 'place') {
+        Alert.alert('Place detected', 'Use the Quick Capture button to save places to your trip.');
+        return;
+      }
+      setParsedBooking(parsed);
       setPreviewVisible(true);
     } catch (err: any) {
       Alert.alert('Could not read photo', err?.message ?? 'Please try again.');
@@ -1155,10 +1538,14 @@ export default function StopDetailScreen() {
       });
       if (result.canceled) return;
       const asset = result.assets[0];
-      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
-      const base64 = await readUriAsBase64(asset.uri);
-      const booking = await parseBookingFile(base64, mediaType);
-      setParsedBooking(booking);
+      const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
+      const parsed: ParsedContent = await parseBookingFile(base64, mediaType);
+      if (parsed.type === 'place') {
+        Alert.alert('Place detected', 'Use the Quick Capture button to save places to your trip.');
+        return;
+      }
+      setParsedBooking(parsed);
       setPreviewVisible(true);
     } catch (err: any) {
       Alert.alert('Could not take photo', err?.message ?? 'Please try again.');
@@ -1457,7 +1844,7 @@ export default function StopDetailScreen() {
             <Feather name="more-horizontal" size={22} color={colors.text} />
           </Pressable>
         </View>
-        <SegmentTabs active={activeTab} onChange={setActiveTab} />
+        <SegmentTabs active={activeTab} onChange={setActiveTab} savedCount={savedPlaces.length} />
       </SafeAreaView>
 
       {/* Date suggestion banner — ephemeral, shown after saving accommodation to a dateless stop */}
@@ -1484,7 +1871,15 @@ export default function StopDetailScreen() {
         />
       )}
       {activeTab === 'Days' && <PlaceholderTab label="Days" />}
-      {activeTab === 'Saved' && <PlaceholderTab label="Saved" />}
+      {activeTab === 'Saved' && (
+        <SavedTab
+          places={savedPlaces}
+          loading={!savedPlacesLoaded}
+          stopId={stop.id}
+          tripId={stop.trip_id}
+          onPlaceAdded={(place) => setSavedPlaces((prev) => [place, ...prev])}
+        />
+      )}
 
       {/* Stop action menu */}
       <StopActionMenu
@@ -1798,4 +2193,97 @@ const styles = StyleSheet.create({
   errorText: { fontFamily: fonts.body, fontSize: 14, color: colors.textMuted, marginBottom: 12, textAlign: 'center' },
   retryButton: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: colors.border },
   retryText: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.primary },
+
+  // ── Saved Places tab ──────────────────────────────────────────────────────
+
+  filterRow: { flexGrow: 0, borderBottomWidth: 1, borderBottomColor: colors.border },
+  filterRowContent: {
+    paddingHorizontal: 16, paddingVertical: 10, gap: 8, flexDirection: 'row',
+  },
+  filterChip: {
+    paddingHorizontal: 14, paddingVertical: 6,
+    borderRadius: 20, borderWidth: 1.5, borderColor: colors.border,
+    backgroundColor: colors.white,
+  },
+  filterChipActive: {
+    backgroundColor: colors.primary, borderColor: colors.primary,
+  },
+  filterChipText: {
+    fontFamily: fonts.body, fontSize: 13, color: colors.textMuted,
+  },
+  filterChipTextActive: {
+    fontFamily: fonts.bodyBold, color: colors.white,
+  },
+
+  savedPlacesContent: { padding: 16, paddingBottom: 40 },
+
+  placeRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: colors.white, borderRadius: 14,
+    padding: 14, marginBottom: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05, shadowRadius: 6, elevation: 2,
+  },
+  placeIconWrap: {
+    width: 38, height: 38, borderRadius: 19,
+    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  },
+  placeRowBody: { flex: 1 },
+  placeRowName: {
+    fontFamily: fonts.bodyBold, fontSize: 15, color: colors.text, marginBottom: 2,
+  },
+  placeRowNote: {
+    fontFamily: fonts.body, fontSize: 13, color: colors.textMuted, lineHeight: 18,
+  },
+  categoryBadge: {
+    borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, flexShrink: 0,
+  },
+  categoryBadgeText: {
+    fontFamily: fonts.bodyBold, fontSize: 11, letterSpacing: 0.2,
+  },
+
+  placesEmptyState: {
+    alignItems: 'center', paddingVertical: 60, gap: 10,
+  },
+  placesEmptyHeading: {
+    fontFamily: fonts.displayBold, fontSize: 18, color: colors.text,
+    letterSpacing: -0.2,
+  },
+  placesEmptyBody: {
+    fontFamily: fonts.body, fontSize: 14, color: colors.textMuted,
+    textAlign: 'center', paddingHorizontal: 32,
+  },
+
+  addPlaceButton: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    marginTop: 8, paddingVertical: 14,
+    borderRadius: 14, borderWidth: 1.5, borderColor: colors.border,
+    borderStyle: 'dashed', backgroundColor: colors.white,
+  },
+  addPlaceButtonText: {
+    fontFamily: fonts.bodyBold, fontSize: 14, color: colors.primary,
+  },
+
+  // ── Add place sheet ───────────────────────────────────────────────────────
+
+  addPlaceFieldLabel: {
+    fontFamily: fonts.bodyBold, fontSize: 11, color: colors.textMuted,
+    letterSpacing: 1.0, textTransform: 'uppercase', marginBottom: 8,
+  },
+  categoryChipGrid: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 8,
+  },
+  categoryChipOption: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 12, paddingVertical: 7,
+    borderRadius: 20, borderWidth: 1.5, borderColor: colors.border,
+    backgroundColor: colors.white,
+  },
+  categoryChipOptionText: {
+    fontFamily: fonts.body, fontSize: 13, color: colors.text,
+  },
+  noteInput: {
+    fontFamily: fonts.body, fontSize: 14, color: colors.text,
+    padding: 14, minHeight: 80, textAlignVertical: 'top',
+  },
 });

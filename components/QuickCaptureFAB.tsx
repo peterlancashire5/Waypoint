@@ -20,10 +20,13 @@ import { supabase } from '@/lib/supabase';
 import {
   parseBookingFile,
   mediaTypeFromUri,
-  readUriAsBase64,
+  readAndPrepareBase64,
   type ParsedBooking,
+  type ParsedContent,
   type TransportBooking,
 } from '@/lib/claude';
+import { enrichPlace } from '@/lib/placesEnrichment';
+import { saveEnrichedPlace } from '@/lib/savedPlaceUtils';
 import { checkDuplicate, confirmDuplicate } from '@/lib/duplicateCheck';
 import {
   createTransportBooking,
@@ -663,8 +666,8 @@ export default function QuickCaptureFAB() {
       if (result.canceled) return;
 
       const asset = result.assets[0];
-      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
-      const base64 = await readUriAsBase64(asset.uri);
+      const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
+      const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
     } catch (err: any) {
@@ -691,8 +694,8 @@ export default function QuickCaptureFAB() {
       if (result.canceled) return;
 
       const asset = result.assets[0];
-      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
-      const base64 = await readUriAsBase64(asset.uri);
+      const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
     } catch (err: any) {
@@ -719,8 +722,8 @@ export default function QuickCaptureFAB() {
       if (result.canceled) return;
 
       const asset = result.assets[0];
-      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
-      const base64 = await readUriAsBase64(asset.uri);
+      const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
     } catch (err: any) {
@@ -732,7 +735,34 @@ export default function QuickCaptureFAB() {
 
   // ── Matching + connection detection ──────────────────────────────────────
 
-  async function handleParsed(booking: ParsedBooking) {
+  async function handleParsed(parsed: ParsedContent) {
+    // ── Place recommendation ───────────────────────────────────────────────
+    if (parsed.type === 'place') {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session?.user) throw new Error('Not authenticated.');
+
+        const enriched = await enrichPlace(parsed.name, parsed.city, parsed.category);
+        const result = await saveEnrichedPlace(enriched, parsed.note, session.user.id);
+
+        if (result.duplicate) {
+          setToastMessage(
+            `${result.name} is already saved to ${result.city ?? 'this stop'}`,
+          );
+        } else if (result.match.matched === 'single') {
+          setToastMessage(`Saved ${result.item.name} to ${result.item.city ?? 'your trip'}`);
+        } else {
+          setToastMessage(`${result.item.name} saved to Inbox`);
+        }
+      } catch (err: any) {
+        Alert.alert('Could not save place', err?.message ?? 'Please try again.');
+      }
+      return;
+    }
+
+    // ── Booking confirmation ───────────────────────────────────────────────
+    const booking: ParsedBooking = parsed;
+
     // For single-segment transport bookings, run smart connection detection
     // before falling through to the standard gap picker.
     if (booking.type === 'transport') {
