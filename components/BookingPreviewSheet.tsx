@@ -15,7 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
-import type { ParsedBooking, TransportBooking } from '@/lib/claude';
+import type { ParsedBooking, TransportBooking, ConnectionBooking } from '@/lib/claude';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,10 +25,24 @@ export interface StopOption {
   tripName: string;
 }
 
+/** Represents the gap between two consecutive stops — used for transport booking assignment. */
+export interface LegGapOption {
+  /** The destination stop's id — passed as `stopId` to onSave so existing save logic is unchanged. */
+  id: string;
+  /** The origin stop's id — needed to create a leg on demand when none exists yet. */
+  fromStopId: string;
+  fromCity: string;
+  toCity: string;
+  tripName: string;
+  tripId: string;
+}
+
 interface Props {
   visible: boolean;
   booking: ParsedBooking | null;
   stops: StopOption[];
+  /** Leg gaps to show for transport/connection bookings instead of the stop picker. */
+  legGaps?: LegGapOption[];
   saving: boolean;
   onSave: (booking: ParsedBooking, stopId: string | null) => void;
   onDiscard: () => void;
@@ -37,15 +51,28 @@ interface Props {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function bestMatchStop(booking: ParsedBooking, stops: StopOption[]): StopOption | null {
-  const targetCity =
-    booking.type === 'transport'
-      ? booking.destination_city
-      : booking.type === 'accommodation'
-      ? booking.city
-      : booking.city;
+  let targetCity: string | null = null;
+  if (booking.type === 'transport') {
+    targetCity = booking.destination_city;
+  } else if (booking.type === 'accommodation') {
+    targetCity = booking.city;
+  } else if (booking.type === 'connection') {
+    targetCity = booking.legs[booking.legs.length - 1]?.destination_city ?? null;
+  } else {
+    targetCity = (booking as any).city ?? null;
+  }
   if (!targetCity) return null;
   const needle = targetCity.toLowerCase().trim();
   return stops.find((s) => s.city.toLowerCase().trim() === needle) ?? null;
+}
+
+function bestMatchGap(booking: ParsedBooking, gaps: LegGapOption[]): LegGapOption | null {
+  let destCity: string | null = null;
+  if (booking.type === 'transport') destCity = booking.destination_city;
+  else if (booking.type === 'connection') destCity = booking.legs[booking.legs.length - 1]?.destination_city ?? null;
+  if (!destCity) return null;
+  const needle = destCity.toLowerCase().trim();
+  return gaps.find((g) => g.toCity.toLowerCase().trim() === needle) ?? null;
 }
 
 function transportLabel(b: TransportBooking): string {
@@ -60,6 +87,7 @@ function transportLabel(b: TransportBooking): string {
 function bookingLabel(booking: ParsedBooking): string {
   if (booking.type === 'transport')     return transportLabel(booking);
   if (booking.type === 'accommodation') return 'Accommodation';
+  if (booking.type === 'connection')    return 'Connection';
   return 'Document';
 }
 
@@ -77,6 +105,7 @@ export function transportIcon(transport_type: string): FeatherName {
 function bookingIcon(booking: ParsedBooking): FeatherName {
   if (booking.type === 'transport')     return transportIcon(booking.transport_type);
   if (booking.type === 'accommodation') return 'home';
+  if (booking.type === 'connection')    return transportIcon(booking.legs[0]?.transport_type ?? 'flight');
   return 'file-text';
 }
 
@@ -120,6 +149,7 @@ function TransportDetails({ b }: { b: TransportBooking }) {
       <DetailRow label="To station"    value={b.destination_station} />
       {/* Bus */}
       <DetailRow label="Pickup"      value={b.pickup_point} />
+      <DetailRow label="Dropoff"     value={b.dropoff_point} />
       {/* Ferry */}
       <DetailRow label="Deck"          value={b.deck} />
       <DetailRow label="Cabin"         value={b.cabin} />
@@ -131,12 +161,37 @@ function TransportDetails({ b }: { b: TransportBooking }) {
 function AccommodationDetails({ b }: { b: Extract<ParsedBooking, { type: 'accommodation' }> }) {
   return (
     <>
-      <DetailRow label="Property"    value={b.hotel_name} />
-      <DetailRow label="City"        value={b.city} />
-      <DetailRow label="Check-in"    value={b.check_in_date} />
-      <DetailRow label="Check-out"   value={b.check_out_date} />
+      <DetailRow label="Property"       value={b.hotel_name} />
+      <DetailRow label="City"           value={b.city} />
+      <DetailRow label="Check-in"       value={b.check_in_date} />
+      <DetailRow label="Check-in time"  value={b.check_in_time} />
+      <DetailRow label="Check-out"      value={b.check_out_date} />
+      <DetailRow label="Check-out time" value={b.check_out_time} />
       {b.nights !== null && <DetailRow label="Nights" value={String(b.nights)} />}
+      <DetailRow label="Booking ref"    value={b.booking_ref} />
+      <DetailRow label="Wi-Fi name"     value={b.wifi_name} />
+      <DetailRow label="Wi-Fi password" value={b.wifi_password} />
+    </>
+  );
+}
+
+function ConnectionDetails({ b }: { b: ConnectionBooking }) {
+  const first = b.legs[0];
+  const last  = b.legs[b.legs.length - 1];
+  return (
+    <>
+      <View style={styles.routeRow}>
+        <Text style={styles.routeCity}>{first?.origin_city || '—'}</Text>
+        <Feather name="arrow-right" size={14} color={colors.textMuted} style={styles.routeArrow} />
+        <Text style={styles.routeCity}>{last?.destination_city || '—'}</Text>
+      </View>
       <DetailRow label="Booking ref" value={b.booking_ref} />
+      {b.legs.map((leg, i) => (
+        <View key={i} style={styles.connectionLeg}>
+          <Text style={styles.connectionLegLabel}>Leg {leg.leg_order}</Text>
+          <TransportDetails b={{ ...leg, type: 'transport', booking_ref: b.booking_ref ?? '' }} />
+        </View>
+      ))}
     </>
   );
 }
@@ -154,20 +209,36 @@ function OtherDetails({ b }: { b: Extract<ParsedBooking, { type: 'other' }> }) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function BookingPreviewSheet({
-  visible, booking, stops, saving, onSave, onDiscard,
+  visible, booking, stops, legGaps, saving, onSave, onDiscard,
 }: Props) {
   const insets = useSafeAreaInsets();
   const slideAnim = useRef(new Animated.Value(0)).current;
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
   const [stopPickerOpen, setStopPickerOpen] = useState(false);
+  const [selectedGapId, setSelectedGapId] = useState<string | null>(null);
+  const [gapPickerOpen, setGapPickerOpen] = useState(false);
 
-  const autoMatch = booking ? bestMatchStop(booking, stops) : null;
-  const effectiveStopId = selectedStopId ?? autoMatch?.id ?? null;
-  const selectedStop = stops.find((s) => s.id === effectiveStopId) ?? autoMatch ?? null;
+  const isTransport = booking?.type === 'transport' || booking?.type === 'connection';
+  const showLegPicker = isTransport && legGaps && legGaps.length > 0;
+
+  // Stop picker (accommodation / other)
+  const autoMatchStop = (!showLegPicker && booking) ? bestMatchStop(booking, stops) : null;
+  const effectiveStopId = selectedStopId ?? autoMatchStop?.id ?? null;
+  const selectedStop = stops.find((s) => s.id === effectiveStopId) ?? autoMatchStop ?? null;
+
+  // Gap picker (transport / connection)
+  const autoMatchGap = (showLegPicker && booking) ? bestMatchGap(booking, legGaps!) : null;
+  const effectiveGapId = selectedGapId ?? autoMatchGap?.id ?? null;
+  const selectedGap = legGaps?.find((g) => g.id === effectiveGapId) ?? autoMatchGap ?? null;
+
+  // What gets passed to onSave as stopId
+  const saveTargetId = showLegPicker ? effectiveGapId : effectiveStopId;
 
   React.useEffect(() => {
     setSelectedStopId(null);
     setStopPickerOpen(false);
+    setSelectedGapId(null);
+    setGapPickerOpen(false);
   }, [booking]);
 
   React.useEffect(() => {
@@ -211,56 +282,112 @@ export default function BookingPreviewSheet({
           <View style={styles.card}>
             {booking.type === 'transport'     && <TransportDetails b={booking} />}
             {booking.type === 'accommodation' && <AccommodationDetails b={booking} />}
+            {booking.type === 'connection'    && <ConnectionDetails b={booking} />}
             {booking.type === 'other'         && <OtherDetails b={booking} />}
           </View>
 
-          <Text style={styles.sectionLabel}>Save to stop</Text>
-          <TouchableOpacity
-            style={styles.stopSelector}
-            activeOpacity={0.7}
-            onPress={() => setStopPickerOpen((o) => !o)}
-            disabled={saving}
-          >
-            <View style={styles.stopSelectorLeft}>
-              <Feather name="map-pin" size={15} color={colors.primary} />
-              <Text style={styles.stopSelectorText}>
-                {selectedStop
-                  ? `${selectedStop.city} · ${selectedStop.tripName}`
-                  : 'No stop selected'}
-              </Text>
-            </View>
-            <Feather
-              name={stopPickerOpen ? 'chevron-up' : 'chevron-down'}
-              size={16}
-              color={colors.textMuted}
-            />
-          </TouchableOpacity>
-
-          {stopPickerOpen && (
-            <View style={styles.stopList}>
+          {showLegPicker ? (
+            <>
+              <Text style={styles.sectionLabel}>Add to leg</Text>
               <TouchableOpacity
-                style={styles.stopRow}
+                style={styles.stopSelector}
                 activeOpacity={0.7}
-                onPress={() => { setSelectedStopId(null); setStopPickerOpen(false); }}
+                onPress={() => setGapPickerOpen((o) => !o)}
+                disabled={saving}
               >
-                <Text style={[styles.stopRowText, !effectiveStopId && styles.stopRowTextActive]}>
-                  None
-                </Text>
-              </TouchableOpacity>
-              {stops.map((s) => (
-                <TouchableOpacity
-                  key={s.id}
-                  style={styles.stopRow}
-                  activeOpacity={0.7}
-                  onPress={() => { setSelectedStopId(s.id); setStopPickerOpen(false); }}
-                >
-                  <Text style={[styles.stopRowText, s.id === effectiveStopId && styles.stopRowTextActive]}>
-                    {s.city}
+                <View style={styles.stopSelectorLeft}>
+                  <Feather name="send" size={15} color={colors.primary} />
+                  <Text style={styles.stopSelectorText}>
+                    {selectedGap
+                      ? `${selectedGap.fromCity} → ${selectedGap.toCity} · ${selectedGap.tripName}`
+                      : 'No leg selected'}
                   </Text>
-                  <Text style={styles.stopRowMeta}>{s.tripName}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+                </View>
+                <Feather
+                  name={gapPickerOpen ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={colors.textMuted}
+                />
+              </TouchableOpacity>
+
+              {gapPickerOpen && (
+                <View style={styles.stopList}>
+                  <TouchableOpacity
+                    style={styles.stopRow}
+                    activeOpacity={0.7}
+                    onPress={() => { setSelectedGapId(null); setGapPickerOpen(false); }}
+                  >
+                    <Text style={[styles.stopRowText, !effectiveGapId && styles.stopRowTextActive]}>
+                      None
+                    </Text>
+                  </TouchableOpacity>
+                  {legGaps!.map((g) => (
+                    <TouchableOpacity
+                      key={g.id}
+                      style={styles.stopRow}
+                      activeOpacity={0.7}
+                      onPress={() => { setSelectedGapId(g.id); setGapPickerOpen(false); }}
+                    >
+                      <Text style={[styles.stopRowText, g.id === effectiveGapId && styles.stopRowTextActive]}>
+                        {g.fromCity} → {g.toCity}
+                      </Text>
+                      <Text style={styles.stopRowMeta}>{g.tripName}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </>
+          ) : (
+            <>
+              <Text style={styles.sectionLabel}>Save to stop</Text>
+              <TouchableOpacity
+                style={styles.stopSelector}
+                activeOpacity={0.7}
+                onPress={() => setStopPickerOpen((o) => !o)}
+                disabled={saving}
+              >
+                <View style={styles.stopSelectorLeft}>
+                  <Feather name="map-pin" size={15} color={colors.primary} />
+                  <Text style={styles.stopSelectorText}>
+                    {selectedStop
+                      ? `${selectedStop.city} · ${selectedStop.tripName}`
+                      : 'No stop selected'}
+                  </Text>
+                </View>
+                <Feather
+                  name={stopPickerOpen ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={colors.textMuted}
+                />
+              </TouchableOpacity>
+
+              {stopPickerOpen && (
+                <View style={styles.stopList}>
+                  <TouchableOpacity
+                    style={styles.stopRow}
+                    activeOpacity={0.7}
+                    onPress={() => { setSelectedStopId(null); setStopPickerOpen(false); }}
+                  >
+                    <Text style={[styles.stopRowText, !effectiveStopId && styles.stopRowTextActive]}>
+                      None
+                    </Text>
+                  </TouchableOpacity>
+                  {stops.map((s) => (
+                    <TouchableOpacity
+                      key={s.id}
+                      style={styles.stopRow}
+                      activeOpacity={0.7}
+                      onPress={() => { setSelectedStopId(s.id); setStopPickerOpen(false); }}
+                    >
+                      <Text style={[styles.stopRowText, s.id === effectiveStopId && styles.stopRowTextActive]}>
+                        {s.city}
+                      </Text>
+                      <Text style={styles.stopRowMeta}>{s.tripName}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </>
           )}
         </ScrollView>
 
@@ -278,7 +405,7 @@ export default function BookingPreviewSheet({
               pressed && styles.pressed,
               saving && styles.saveButtonDisabled,
             ]}
-            onPress={() => onSave(booking, effectiveStopId)}
+            onPress={() => onSave(booking, saveTargetId)}
             disabled={saving}
           >
             {saving ? (
@@ -358,4 +485,6 @@ const styles = StyleSheet.create({
   },
   saveButtonDisabled: { opacity: 0.7 },
   saveText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.white },
+  connectionLeg: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8, marginTop: 4, gap: 8 },
+  connectionLegLabel: { fontFamily: fonts.bodyBold, fontSize: 11, color: colors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' },
 });

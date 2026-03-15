@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   View,
   Text,
   StyleSheet,
@@ -9,12 +10,17 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import { createTransportBooking } from '@/lib/journeyUtils';
+import { transportIcon } from '@/components/BookingPreviewSheet';
+import ManualTransportSheet from '@/components/ManualTransportSheet';
+import type { StopOption } from '@/components/BookingPreviewSheet';
+import type { ParsedBooking } from '@/lib/claude';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,10 +54,22 @@ interface DbTrip {
   legs: DbLeg[];
 }
 
+interface TransportItem {
+  id: string;
+  source: 'leg_bookings' | 'saved_items';
+  transport_type: string;
+  operator: string;
+  service_number: string;
+  origin_city: string;
+  destination_city: string;
+  departure_date: string | null;
+  departure_time: string | null;
+}
+
 type ItineraryItem =
   | { kind: 'stop'; stop: DbStop; stopIndex: number }
-  | { kind: 'leg'; leg: DbLeg; fromCity: string; toCity: string }
-  | { kind: 'gap'; fromCity: string; toCity: string };
+  | { kind: 'leg'; leg: DbLeg; fromCity: string; toCity: string; transport: TransportItem[] }
+  | { kind: 'gap'; fromCity: string; toCity: string; toStopId: string; transport: TransportItem[] };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -84,8 +102,15 @@ function transportLabel(type: TransportType | null): string {
   return type.charAt(0).toUpperCase() + type.slice(1);
 }
 
-function buildItinerary(stops: DbStop[], legs: DbLeg[]): ItineraryItem[] {
-  // Map "fromId:toId" → leg for O(1) lookup
+function cityEq(a: string, b: string): boolean {
+  return a.toLowerCase().trim() === b.toLowerCase().trim();
+}
+
+function buildItinerary(
+  stops: DbStop[],
+  legs: DbLeg[],
+  allTransport: TransportItem[],
+): ItineraryItem[] {
   const legByStops = new Map(
     legs
       .filter(l => l.from_stop_id && l.to_stop_id)
@@ -96,12 +121,24 @@ function buildItinerary(stops: DbStop[], legs: DbLeg[]): ItineraryItem[] {
   for (let i = 0; i < stops.length; i++) {
     items.push({ kind: 'stop', stop: stops[i], stopIndex: i });
     if (i < stops.length - 1) {
-      const key = `${stops[i].id}:${stops[i + 1].id}`;
+      const fromStop = stops[i];
+      const toStop = stops[i + 1];
+      const key = `${fromStop.id}:${toStop.id}`;
       const leg = legByStops.get(key);
+      // Match transports whose origin→destination aligns with this gap/leg
+      const matched = allTransport.filter(
+        (t) => cityEq(t.origin_city, fromStop.city) && cityEq(t.destination_city, toStop.city),
+      );
       if (leg) {
-        items.push({ kind: 'leg', leg, fromCity: stops[i].city, toCity: stops[i + 1].city });
+        items.push({ kind: 'leg', leg, fromCity: fromStop.city, toCity: toStop.city, transport: matched });
       } else {
-        items.push({ kind: 'gap', fromCity: stops[i].city, toCity: stops[i + 1].city });
+        items.push({
+          kind: 'gap',
+          fromCity: fromStop.city,
+          toCity: toStop.city,
+          toStopId: toStop.id,
+          transport: matched,
+        });
       }
     }
   }
@@ -123,9 +160,7 @@ function TransportIcon({ type, size = 15, color = colors.textMuted }: {
   return <MaterialCommunityIcons name={name} size={size} color={color} />;
 }
 
-function StopRow({
-  item, onPress,
-}: {
+function StopRow({ item, onPress }: {
   item: Extract<ItineraryItem, { kind: 'stop' }>;
   onPress: () => void;
 }) {
@@ -153,9 +188,7 @@ function StopRow({
   );
 }
 
-function LegRow({
-  item, onPress,
-}: {
+function LegRow({ item, onPress }: {
   item: Extract<ItineraryItem, { kind: 'leg' }>;
   onPress: () => void;
 }) {
@@ -176,17 +209,59 @@ function LegRow({
   );
 }
 
-function GapRow({ fromCity, toCity }: { fromCity: string; toCity: string }) {
+function GapRow({ item, onAddTransport, onTransportPress }: {
+  item: Extract<ItineraryItem, { kind: 'gap' }>;
+  onAddTransport: () => void;
+  onTransportPress: (t: TransportItem) => void;
+}) {
+  const { fromCity, toCity, transport } = item;
+
+  if (transport.length > 0) {
+    // Show the first (best) matched transport booking
+    const t = transport[0];
+    const icon = transportIcon(t.transport_type);
+    const meta = [
+      t.departure_date
+        ? (() => { const d = new Date(t.departure_date + 'T00:00:00'); return `${d.getDate()} ${MONTHS[d.getMonth()]}`; })()
+        : null,
+      t.departure_time || null,
+    ].filter(Boolean).join(' · ');
+
+    return (
+      <Pressable
+        style={({ pressed }) => [styles.gapRow, styles.gapRowFilled, pressed && styles.rowPressed]}
+        onPress={() => onTransportPress(t)}
+      >
+        <View style={styles.gapIconWrapFilled}>
+          <Feather name={icon} size={13} color={colors.primary} />
+        </View>
+        <View style={styles.gapTransportBody}>
+          <Text style={styles.gapTransportRoute} numberOfLines={1}>
+            {fromCity} → {toCity}
+          </Text>
+          <Text style={styles.gapTransportMeta} numberOfLines={1}>
+            {[t.operator, t.service_number].filter(Boolean).join(' ')}
+            {meta ? `  ·  ${meta}` : ''}
+          </Text>
+        </View>
+        <Feather name="chevron-right" size={15} color={colors.border} />
+      </Pressable>
+    );
+  }
+
   return (
-    <View style={styles.gapRow}>
+    <Pressable
+      style={({ pressed }) => [styles.gapRow, pressed && styles.rowPressed]}
+      onPress={onAddTransport}
+    >
       <View style={styles.gapIconWrap}>
-        <Feather name="plus" size={12} color={colors.border} />
+        <Feather name="plus" size={12} color={colors.primary} />
       </View>
       <Text style={styles.gapText} numberOfLines={1}>
         {fromCity} → {toCity}
       </Text>
       <Text style={styles.gapAction}>Add transport</Text>
-    </View>
+    </Pressable>
   );
 }
 
@@ -206,42 +281,248 @@ export default function TripDetailScreen() {
   const [trip, setTrip] = useState<DbTrip | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [itinerary, setItinerary] = useState<ItineraryItem[]>([]);
+  const [stopOptions, setStopOptions] = useState<StopOption[]>([]);
 
-  useEffect(() => {
-    const fetchTrip = async () => {
-      if (!tripId) {
-        setError('No trip specified.');
-        setLoading(false);
-        return;
-      }
+  // Manual transport sheet state
+  const [manualVisible, setManualVisible] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [activeToStopId, setActiveToStopId] = useState<string | null>(null);
 
-      const { data, error: fetchError } = await supabase
-        .from('trips')
-        .select('*, stops(*), legs(*)')
-        .eq('id', tripId)
-        .single();
+  useFocusEffect(
+    useCallback(() => {
+      const fetchTrip = async () => {
+        if (!tripId) {
+          setError('No trip specified.');
+          setLoading(false);
+          return;
+        }
 
-      if (fetchError || !data) {
-        setError('Could not load this trip.');
-      } else {
+        const { data: { session } } = await supabase.auth.getSession();
+        const userId = session?.user?.id ?? null;
+
+        const { data, error: fetchError } = await supabase
+          .from('trips')
+          .select('*, stops(*), legs(*)')
+          .eq('id', tripId)
+          .single();
+
+        if (fetchError || !data) {
+          setError('Could not load this trip.');
+          setLoading(false);
+          return;
+        }
+
         const raw = data as any;
-        setTrip({
-          ...raw,
-          stops: (raw.stops as DbStop[])
-            .slice()
-            .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0)),
-          legs: (raw.legs as DbLeg[])
-            .slice()
-            .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0)),
+        const sortedStops = (raw.stops as DbStop[])
+          .slice()
+          .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+        const sortedLegs = (raw.legs as DbLeg[])
+          .slice()
+          .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+
+        setTrip({ ...raw, stops: sortedStops, legs: sortedLegs });
+        setStopOptions(sortedStops.map((s) => ({ id: s.id, city: s.city, tripName: raw.name ?? '' })));
+
+        const stopIds = sortedStops.map((s) => s.id);
+        if (stopIds.length === 0 || !userId) {
+          setItinerary(buildItinerary(sortedStops, sortedLegs, []));
+          setLoading(false);
+          return;
+        }
+
+        // Leg IDs whose destination is one of this trip's stops (needed for
+        // backward-compat fetch of old leg_bookings without journey_id).
+        const inboundLegIds = sortedLegs
+          .filter((l) => l.to_stop_id && stopIds.includes(l.to_stop_id))
+          .map((l) => l.id);
+
+        // Step 1: fetch journeys for this trip + saved_items transport
+        const [journeyResult, savedTResult] = await Promise.all([
+          supabase
+            .from('journeys')
+            .select('id, origin_city, destination_city, leg_id')
+            .eq('trip_id', tripId!),
+          supabase
+            .from('saved_items')
+            .select('id, stop_id, note')
+            .in('stop_id', stopIds)
+            .eq('creator_id', userId)
+            .eq('category', 'Transport'),
+        ]);
+
+        const journeys = (journeyResult.data ?? []) as any[];
+        const journeyIds = journeys.map((j: any) => j.id);
+
+        // Step 2: fetch leg_bookings — new records (via journey_id) and old
+        // records without journey_id (backward compat)
+        const [journeyLbResult, oldLbResult] = await Promise.all([
+          journeyIds.length > 0
+            ? supabase
+                .from('leg_bookings')
+                .select('id, journey_id, leg_id, operator, reference')
+                .in('journey_id', journeyIds)
+                .eq('owner_id', userId)
+            : Promise.resolve({ data: [], error: null }),
+          inboundLegIds.length > 0
+            ? supabase
+                .from('leg_bookings')
+                .select('id, leg_id, operator, reference')
+                .in('leg_id', inboundLegIds)
+                .eq('owner_id', userId)
+                .is('journey_id', null)
+            : Promise.resolve({ data: [], error: null }),
+        ]);
+
+        // Build flat transport list for city-based gap matching
+        const allTransport: TransportItem[] = [];
+
+        // Journey-backed leg_bookings: use the journey's stored cities.
+        // Deduplicate by journey_id — connections create N leg_bookings per journey
+        // but we only want one transport item per journey.
+        const seenJourneys = new Set<string>();
+        for (const lb of (journeyLbResult.data ?? []) as any[]) {
+          const journey = journeys.find((j: any) => j.id === lb.journey_id);
+          if (!journey) continue;
+          if (seenJourneys.has(lb.journey_id)) continue;
+          seenJourneys.add(lb.journey_id);
+          allTransport.push({
+            id: lb.id,
+            source: 'leg_bookings',
+            transport_type: 'flight',
+            operator: lb.operator ?? '',
+            service_number: lb.reference ?? '',
+            origin_city: journey.origin_city,
+            destination_city: journey.destination_city,
+            departure_date: null,
+            departure_time: null,
+          });
+        }
+
+        // Old leg_bookings (no journey_id) — derive cities from stop records
+        for (const lb of (oldLbResult.data ?? []) as any[]) {
+          const leg = sortedLegs.find((l) => l.id === lb.leg_id);
+          if (!leg || !leg.to_stop_id || !leg.from_stop_id) continue;
+          const fromStop = sortedStops.find((s) => s.id === leg.from_stop_id);
+          const toStop = sortedStops.find((s) => s.id === leg.to_stop_id);
+          if (!fromStop || !toStop) continue;
+          allTransport.push({
+            id: lb.id,
+            source: 'leg_bookings',
+            transport_type: 'flight',
+            operator: lb.operator ?? '',
+            service_number: lb.reference ?? '',
+            origin_city: fromStop.city,
+            destination_city: toStop.city,
+            departure_date: null,
+            departure_time: null,
+          });
+        }
+
+        for (const sf of savedTResult.data ?? []) {
+          try {
+            const parsed = JSON.parse((sf as any).note ?? '{}');
+
+            // Connection bookings store legs in a nested array
+            const isConnection = parsed.is_connection === true && Array.isArray(parsed.legs) && parsed.legs.length > 0;
+            const firstLeg = isConnection ? parsed.legs[0] : parsed;
+            const lastLeg  = isConnection ? parsed.legs[parsed.legs.length - 1] : parsed;
+
+            const originCity: string = firstLeg?.origin_city ?? '';
+            const destinationCity: string = lastLeg?.destination_city ?? '';
+            if (!originCity || !destinationCity) continue;
+
+            allTransport.push({
+              id: (sf as any).id,
+              source: 'saved_items',
+              transport_type: firstLeg?.transport_type ?? 'flight',
+              operator: firstLeg?.operator ?? firstLeg?.airline ?? '',
+              service_number: firstLeg?.service_number ?? firstLeg?.flight_number ?? '',
+              origin_city: originCity,
+              destination_city: destinationCity,
+              departure_date: firstLeg?.departure_date ?? null,
+              departure_time: firstLeg?.departure_time ?? null,
+            });
+          } catch { /* skip malformed */ }
+        }
+
+        setItinerary(buildItinerary(sortedStops, sortedLegs, allTransport));
+        setLoading(false);
+      };
+
+      setLoading(true);
+      setError(null);
+      fetchTrip();
+    }, [tripId])
+  );
+
+  // ── Add transport (manual) ────────────────────────────────────────────────
+
+  async function handleSaveManualTransport(booking: ParsedBooking, stopId: string | null) {
+    if (booking.type !== 'transport') return;
+    setSaving(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) throw new Error('Not signed in.');
+
+      const targetStopId = stopId ?? activeToStopId;
+
+      // Try to match a leg by destination city first
+      const { data: legs } = await supabase
+        .from('legs')
+        .select('id, from_stop:from_stop_id(city), to_stop:to_stop_id(city)')
+        .eq('trip_id', tripId)
+        .limit(50);
+
+      const matchedLeg = (legs ?? []).find(
+        (l: any) => cityEq(l.to_stop?.city ?? '', booking.destination_city ?? ''),
+      );
+
+      if (matchedLeg) {
+        await createTransportBooking({
+          tripId: tripId!,
+          legId: matchedLeg.id,
+          originCity: booking.origin_city ?? (matchedLeg as any).from_stop?.city ?? '',
+          destinationCity: booking.destination_city ?? (matchedLeg as any).to_stop?.city ?? '',
+          userId,
+          operator: booking.operator,
+          serviceNumber: booking.service_number,
+          seat: booking.seat,
+          confirmationRef: booking.booking_ref,
+        });
+      } else {
+        await supabase.from('saved_items').insert({
+          stop_id: targetStopId,
+          creator_id: userId,
+          name: `${booking.operator} ${booking.service_number}`.trim(),
+          category: 'Transport',
+          note: JSON.stringify({
+            transport_type: booking.transport_type,
+            operator: booking.operator,
+            service_number: booking.service_number,
+            origin_city: booking.origin_city,
+            destination_city: booking.destination_city,
+            departure_date: booking.departure_date,
+            departure_time: booking.departure_time,
+            arrival_date: booking.arrival_date,
+            arrival_time: booking.arrival_time,
+            booking_ref: booking.booking_ref,
+            seat: booking.seat,
+          }),
         });
       }
-      setLoading(false);
-    };
 
-    fetchTrip();
-  }, [tripId]);
+      setManualVisible(false);
+      setActiveToStopId(null);
+    } catch (err: any) {
+      Alert.alert('Could not save', err?.message ?? 'Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  // ── Loading ──────────────────────────────────────────────────────────────
+  // ── Loading ───────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <View style={[styles.container, styles.centred]}>
@@ -251,7 +532,7 @@ export default function TripDetailScreen() {
     );
   }
 
-  // ── Error ────────────────────────────────────────────────────────────────
+  // ── Error ─────────────────────────────────────────────────────────────────
   if (error || !trip) {
     return (
       <View style={styles.container}>
@@ -273,11 +554,10 @@ export default function TripDetailScreen() {
     );
   }
 
-  // ── Render ───────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
   const tripDateRange = formatDateRange(trip.start_date, trip.end_date);
   const nights = trip.stops.reduce((sum, s) => sum + stopNights(s), 0);
   const meta = [tripDateRange, nights > 0 ? `${nights} nights` : ''].filter(Boolean).join(' · ');
-  const itinerary = buildItinerary(trip.stops, trip.legs);
 
   return (
     <View style={styles.container}>
@@ -325,18 +605,46 @@ export default function TripDetailScreen() {
               {item.kind === 'leg' && (
                 <LegRow
                   item={item}
-                  onPress={() =>
-                    router.push({ pathname: '/leg', params: { legId: item.leg.id } })
-                  }
+                  onPress={() => {
+                    const t = item.transport[0];
+                    if (t) {
+                      router.push({
+                        pathname: '/booking-detail',
+                        params: { type: 'transport', id: t.id, source: t.source },
+                      });
+                    } else {
+                      router.push({ pathname: '/leg', params: { legId: item.leg.id } });
+                    }
+                  }}
                 />
               )}
               {item.kind === 'gap' && (
-                <GapRow fromCity={item.fromCity} toCity={item.toCity} />
+                <GapRow
+                  item={item}
+                  onAddTransport={() => {
+                    setActiveToStopId(item.toStopId);
+                    setManualVisible(true);
+                  }}
+                  onTransportPress={(t) =>
+                    router.push({
+                      pathname: '/booking-detail',
+                      params: { type: 'transport', id: t.id, source: t.source },
+                    })
+                  }
+                />
               )}
             </React.Fragment>
           ))
         )}
       </ScrollView>
+
+      <ManualTransportSheet
+        visible={manualVisible}
+        stops={stopOptions}
+        saving={saving}
+        onSave={handleSaveManualTransport}
+        onDiscard={() => { setManualVisible(false); setActiveToStopId(null); }}
+      />
     </View>
   );
 }
@@ -351,7 +659,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: colors.border,
   },
 
-  // Nav row
   navRow: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4,
@@ -359,7 +666,6 @@ const styles = StyleSheet.create({
   backButton: { width: 36, alignItems: 'flex-start' },
   navSpacer: { flex: 1 },
 
-  // Trip meta (inside safeTop, below nav)
   tripMeta: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 18 },
   typeBadge: {
     alignSelf: 'flex-start',
@@ -376,18 +682,15 @@ const styles = StyleSheet.create({
   },
   tripDetails: { fontFamily: fonts.body, fontSize: 14, color: colors.textMuted },
 
-  // Scroll
   scrollContent: { padding: 16, paddingBottom: 48 },
 
-  // Connector between items
   connector: { alignItems: 'center', height: 20 },
   connectorLine: { width: 2, flex: 1, backgroundColor: colors.border },
 
   // Stop row
   stopRow: {
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: colors.white, borderRadius: 14,
-    padding: 14,
+    backgroundColor: colors.white, borderRadius: 14, padding: 14,
     shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05, shadowRadius: 6, elevation: 2,
   },
@@ -400,13 +703,10 @@ const styles = StyleSheet.create({
   },
   stopNumber: { fontFamily: fonts.bodyBold, fontSize: 13, color: colors.white },
   stopBody: { flex: 1 },
-  stopCity: {
-    fontFamily: fonts.bodyBold, fontSize: 17,
-    color: colors.text, marginBottom: 2,
-  },
+  stopCity: { fontFamily: fonts.bodyBold, fontSize: 17, color: colors.text, marginBottom: 2 },
   stopMeta: { fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
 
-  // Leg row
+  // Leg row (existing leg record)
   legRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     backgroundColor: colors.background,
@@ -418,12 +718,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.white, borderWidth: 1, borderColor: colors.border,
     alignItems: 'center', justifyContent: 'center', flexShrink: 0,
   },
-  legRoute: {
-    flex: 1, fontFamily: fonts.bodyBold, fontSize: 13, color: colors.text,
-  },
+  legRoute: { flex: 1, fontFamily: fonts.bodyBold, fontSize: 13, color: colors.text },
   legType: { fontFamily: fonts.body, fontSize: 12, color: colors.textMuted, flexShrink: 0 },
 
-  // Gap row
+  // Gap row — empty state
   gapRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     borderRadius: 10, borderWidth: 1, borderColor: colors.border,
@@ -431,17 +729,31 @@ const styles = StyleSheet.create({
   },
   gapIconWrap: {
     width: 28, height: 28, borderRadius: 14,
-    borderWidth: 1, borderColor: colors.border,
+    borderWidth: 1, borderColor: colors.primary,
     alignItems: 'center', justifyContent: 'center', flexShrink: 0,
   },
   gapText: { flex: 1, fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
   gapAction: { fontFamily: fonts.bodyBold, fontSize: 12, color: colors.primary, flexShrink: 0 },
 
-  // Empty
+  // Gap row — filled with transport
+  gapRowFilled: {
+    backgroundColor: colors.white,
+    borderColor: colors.border,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04, shadowRadius: 4, elevation: 1,
+  },
+  gapIconWrapFilled: {
+    width: 28, height: 28, borderRadius: 14,
+    backgroundColor: '#EBF3F6',
+    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  },
+  gapTransportBody: { flex: 1 },
+  gapTransportRoute: { fontFamily: fonts.bodyBold, fontSize: 13, color: colors.text, marginBottom: 2 },
+  gapTransportMeta: { fontFamily: fonts.body, fontSize: 12, color: colors.textMuted },
+
   emptyWrap: { alignItems: 'center', paddingVertical: 48, gap: 12 },
   emptyText: { fontFamily: fonts.body, fontSize: 14, color: colors.textMuted },
 
-  // Error / loading
   centred: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
   errorText: {
     fontFamily: fonts.body, fontSize: 14,

@@ -19,6 +19,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { Feather } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
@@ -30,8 +31,11 @@ import {
   type TransportBooking,
   type AccommodationBooking,
 } from '@/lib/claude';
-import BookingPreviewSheet, { transportIcon, type StopOption } from '@/components/BookingPreviewSheet';
+import { checkDuplicate, confirmDuplicate } from '@/lib/duplicateCheck';
+import { createTransportBooking, saveConnectionBooking, buildExtraData } from '@/lib/journeyUtils';
+import BookingPreviewSheet, { transportIcon, type StopOption, type LegGapOption } from '@/components/BookingPreviewSheet';
 import ManualTransportSheet from '@/components/ManualTransportSheet';
+import ManualAccommodationSheet, { type ManualAccommodationData } from '@/components/ManualAccommodationSheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -521,17 +525,23 @@ function UploadCard({
   );
 }
 
-// ─── Transport source picker modal ────────────────────────────────────────────
+// ─── Source picker modal (shared by transport and accommodation) ───────────────
 
-function TransportSourceModal({
+function SourcePickerModal({
   visible,
-  onUpload,
+  title,
+  onUploadFile,
+  onChoosePhoto,
+  onTakePhoto,
   onManual,
   onClose,
 }: {
   visible: boolean;
-  onUpload: () => void;
-  onManual: () => void;
+  title: string;
+  onUploadFile: () => void;
+  onChoosePhoto: () => void;
+  onTakePhoto: () => void;
+  onManual?: () => void;
   onClose: () => void;
 }) {
   return (
@@ -541,10 +551,11 @@ function TransportSourceModal({
       </TouchableWithoutFeedback>
       <View style={styles.sourceSheet}>
         <View style={styles.sourceHandle} />
-        <Text style={styles.sourceTitle}>Add transport</Text>
+        <Text style={styles.sourceTitle}>{title}</Text>
+
         <Pressable
           style={({ pressed }) => [styles.sourceOption, pressed && styles.sourceOptionPressed]}
-          onPress={() => { onClose(); onUpload(); }}
+          onPress={() => { onClose(); onUploadFile(); }}
         >
           <View style={styles.sourceOptionIcon}>
             <Feather name="upload" size={18} color={colors.primary} />
@@ -555,19 +566,50 @@ function TransportSourceModal({
           </View>
           <Feather name="chevron-right" size={16} color={colors.textMuted} />
         </Pressable>
+
         <Pressable
           style={({ pressed }) => [styles.sourceOption, pressed && styles.sourceOptionPressed]}
-          onPress={() => { onClose(); onManual(); }}
+          onPress={() => { onClose(); onChoosePhoto(); }}
         >
           <View style={styles.sourceOptionIcon}>
-            <Feather name="edit-2" size={18} color={colors.primary} />
+            <Feather name="image" size={18} color={colors.primary} />
           </View>
           <View style={styles.sourceOptionBody}>
-            <Text style={styles.sourceOptionTitle}>Enter manually</Text>
-            <Text style={styles.sourceOptionSub}>Type in booking details yourself</Text>
+            <Text style={styles.sourceOptionTitle}>Choose from photos</Text>
+            <Text style={styles.sourceOptionSub}>Pick from your camera roll</Text>
           </View>
           <Feather name="chevron-right" size={16} color={colors.textMuted} />
         </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [styles.sourceOption, pressed && styles.sourceOptionPressed]}
+          onPress={() => { onClose(); onTakePhoto(); }}
+        >
+          <View style={styles.sourceOptionIcon}>
+            <Feather name="camera" size={18} color={colors.primary} />
+          </View>
+          <View style={styles.sourceOptionBody}>
+            <Text style={styles.sourceOptionTitle}>Take a photo</Text>
+            <Text style={styles.sourceOptionSub}>Photograph a printed confirmation</Text>
+          </View>
+          <Feather name="chevron-right" size={16} color={colors.textMuted} />
+        </Pressable>
+
+        {onManual && (
+          <Pressable
+            style={({ pressed }) => [styles.sourceOption, pressed && styles.sourceOptionPressed]}
+            onPress={() => { onClose(); onManual(); }}
+          >
+            <View style={styles.sourceOptionIcon}>
+              <Feather name="edit-2" size={18} color={colors.primary} />
+            </View>
+            <View style={styles.sourceOptionBody}>
+              <Text style={styles.sourceOptionTitle}>Enter manually</Text>
+              <Text style={styles.sourceOptionSub}>Type in booking details yourself</Text>
+            </View>
+            <Feather name="chevron-right" size={16} color={colors.textMuted} />
+          </Pressable>
+        )}
       </View>
     </Modal>
   );
@@ -616,6 +658,7 @@ const DEV_TRAIN: ParsedBooking = {
 const DEV_ACCOMMODATION: ParsedBooking = {
   type: 'accommodation',
   hotel_name: 'The Dhara Dhevi',
+  address: '51/4 Moo 1, Chiang Mai-Sankampaeng Road, Chiang Mai, Thailand',
   city: 'Chiang Mai',
   check_in_date: '2025-04-02',
   check_out_date: '2025-04-05',
@@ -718,6 +761,7 @@ export default function StopDetailScreen() {
 
   // All stops in the same trip (for the "Save to stop" dropdown)
   const [tripStops, setTripStops] = useState<StopOption[]>([]);
+  const [tripLegGaps, setTripLegGaps] = useState<LegGapOption[]>([]);
 
   // Stop action menu + edit sheets
   const [menuVisible, setMenuVisible] = useState(false);
@@ -727,9 +771,11 @@ export default function StopDetailScreen() {
   // Suggestion banner (ephemeral — only shown after saving accommodation with dates)
   const [dateSuggestion, setDateSuggestion] = useState<DateSuggestion | null>(null);
 
-  // Transport source picker
+  // Source picker modals
   const [sourcePickerVisible, setSourcePickerVisible] = useState(false);
+  const [accommodationSourcePickerVisible, setAccommodationSourcePickerVisible] = useState(false);
   const [manualSheetVisible, setManualSheetVisible] = useState(false);
+  const [manualAccommodationSheetVisible, setManualAccommodationSheetVisible] = useState(false);
 
   // PDF/image parsing state
   const [parsingTransport, setParsingTransport] = useState(false);
@@ -777,6 +823,27 @@ export default function StopDetailScreen() {
         );
       }
 
+      // Load legs for this trip to build leg gap options for the transport picker
+      const { data: tripLegs } = await supabase
+        .from('legs')
+        .select('id, from_stop_id, to_stop_id, from_stop:from_stop_id(city), to_stop:to_stop_id(city)')
+        .eq('trip_id', stopData.trip_id)
+        .order('order_index', { ascending: true });
+
+      if (tripLegs) {
+        const gaps: LegGapOption[] = (tripLegs as any[])
+          .filter((l) => l.from_stop?.city && l.to_stop?.city && l.to_stop_id && l.from_stop_id)
+          .map((l) => ({
+            id: l.to_stop_id,
+            fromStopId: l.from_stop_id,
+            fromCity: l.from_stop.city,
+            toCity: l.to_stop.city,
+            tripName: stopData.trips?.name ?? 'Trip',
+            tripId: stopData.trip_id,
+          }));
+        setTripLegGaps(gaps);
+      }
+
       await loadSavedBookings(stopData);
     };
     fetchAll();
@@ -792,7 +859,7 @@ export default function StopDetailScreen() {
     // Accommodation saved to this stop
     const { data: accs, error: accErr } = await supabase
       .from('accommodation')
-      .select('id, name, confirmation_ref, check_in_date, check_out_date')
+      .select('id, name, address, confirmation_ref, check_in_date, check_out_date')
       .eq('stop_id', stopData.id)
       .eq('owner_id', userId);
 
@@ -809,6 +876,7 @@ export default function StopDetailScreen() {
         _source: 'accommodation',
         type: 'accommodation',
         hotel_name: (a as any).name ?? '',
+        address: (a as any).address ?? null,
         city: stopData.city,
         check_in_date: checkInDate,
         check_out_date: checkOutDate,
@@ -830,29 +898,52 @@ export default function StopDetailScreen() {
       const legIds = (inboundLegs as any[]).map((l) => l.id);
       const { data: lbs, error: lbErr } = await supabase
         .from('leg_bookings')
-        .select('*')
+        .select('id, leg_id, journey_id, operator, reference, seat, confirmation_ref, leg_order')
         .in('leg_id', legIds)
         .eq('owner_id', userId);
 
       if (lbErr) console.warn('[logistics] leg_bookings fetch error:', lbErr.message);
 
+      // Fetch journey details so connections show the correct overall cities
+      const journeyIds = [
+        ...new Set((lbs ?? []).map((lb: any) => lb.journey_id).filter(Boolean)),
+      ] as string[];
+      const journeyMap = new Map<string, { origin_city: string; destination_city: string }>();
+      if (journeyIds.length > 0) {
+        const { data: journeyRows } = await supabase
+          .from('journeys')
+          .select('id, origin_city, destination_city')
+          .in('id', journeyIds);
+        for (const j of journeyRows ?? []) {
+          journeyMap.set((j as any).id, j as any);
+        }
+      }
+
+      // Group by journey_id: show one card per journey (not one per leg_booking)
+      const seenJourneys = new Set<string>();
       for (const lb of lbs ?? []) {
-        const leg = (inboundLegs as any[]).find((l) => l.id === lb.leg_id);
+        const journeyId: string | null = (lb as any).journey_id ?? null;
+        if (journeyId) {
+          if (seenJourneys.has(journeyId)) continue; // skip duplicate legs of same connection
+          seenJourneys.add(journeyId);
+        }
+        const leg = (inboundLegs as any[]).find((l) => l.id === (lb as any).leg_id);
+        const journey = journeyId ? journeyMap.get(journeyId) : null;
         items.push({
-          _dbId: lb.id,
+          _dbId: (lb as any).id,
           _source: 'leg_bookings',
           type: 'transport',
           transport_type: 'flight',
-          operator: lb.operator ?? '',
-          service_number: lb.reference ?? '',
-          origin_city: leg?.from_stop?.city ?? '',
-          destination_city: stopData.city,
+          operator: (lb as any).operator ?? '',
+          service_number: (lb as any).reference ?? '',
+          origin_city: journey?.origin_city ?? leg?.from_stop?.city ?? '',
+          destination_city: journey?.destination_city ?? stopData.city,
           departure_date: '',
           departure_time: '',
           arrival_date: '',
           arrival_time: '',
-          booking_ref: lb.confirmation_ref ?? '',
-          seat: lb.seat ?? null,
+          booking_ref: (lb as any).confirmation_ref ?? '',
+          seat: (lb as any).seat ?? null,
           gate: null, terminal: null,
           coach: null, platform: null, origin_station: null, destination_station: null,
           pickup_point: null,
@@ -874,27 +965,36 @@ export default function StopDetailScreen() {
     for (const sf of savedTransports ?? []) {
       try {
         const parsed = JSON.parse((sf as any).note ?? '{}');
-        if (!parsed.origin_city) continue;
+
+        // Connection bookings have a different JSON structure: { is_connection, legs: [...] }
+        const isConnection = parsed.is_connection === true && Array.isArray(parsed.legs) && parsed.legs.length > 0;
+        const firstLeg = isConnection ? parsed.legs[0] : parsed;
+        const lastLeg  = isConnection ? parsed.legs[parsed.legs.length - 1] : parsed;
+
+        const originCity: string = firstLeg?.origin_city ?? '';
+        const destinationCity: string = lastLeg?.destination_city ?? '';
+        if (!originCity) continue;
+
         items.push({
           _dbId: (sf as any).id,
           _source: 'saved_items',
           type: 'transport',
-          transport_type: parsed.transport_type ?? 'flight',
-          operator: parsed.operator ?? parsed.airline ?? '',
-          service_number: parsed.service_number ?? parsed.flight_number ?? '',
-          origin_city: parsed.origin_city ?? '',
-          destination_city: parsed.destination_city ?? '',
-          departure_date: parsed.departure_date ?? '',
-          departure_time: parsed.departure_time ?? '',
-          arrival_date: parsed.arrival_date ?? '',
-          arrival_time: parsed.arrival_time ?? '',
-          booking_ref: parsed.booking_ref ?? '',
-          seat: parsed.seat ?? null,
-          gate: parsed.gate ?? null, terminal: parsed.terminal ?? null,
-          coach: parsed.coach ?? null, platform: parsed.platform ?? null,
-          origin_station: parsed.origin_station ?? null, destination_station: parsed.destination_station ?? null,
-          pickup_point: parsed.pickup_point ?? null,
-          deck: parsed.deck ?? null, cabin: parsed.cabin ?? null, port_terminal: parsed.port_terminal ?? null,
+          transport_type: firstLeg?.transport_type ?? 'flight',
+          operator: firstLeg?.operator ?? firstLeg?.airline ?? '',
+          service_number: firstLeg?.service_number ?? firstLeg?.flight_number ?? '',
+          origin_city: originCity,
+          destination_city: destinationCity,
+          departure_date: firstLeg?.departure_date ?? '',
+          departure_time: firstLeg?.departure_time ?? '',
+          arrival_date: lastLeg?.arrival_date ?? '',
+          arrival_time: lastLeg?.arrival_time ?? '',
+          booking_ref: parsed.booking_ref ?? firstLeg?.booking_ref ?? '',
+          seat: firstLeg?.seat ?? null,
+          gate: firstLeg?.gate ?? null, terminal: firstLeg?.terminal ?? null,
+          coach: firstLeg?.coach ?? null, platform: firstLeg?.platform ?? null,
+          origin_station: firstLeg?.origin_station ?? null, destination_station: lastLeg?.destination_station ?? null,
+          pickup_point: firstLeg?.pickup_point ?? null,
+          deck: firstLeg?.deck ?? null, cabin: firstLeg?.cabin ?? null, port_terminal: firstLeg?.port_terminal ?? null,
         });
       } catch {
         // note wasn't our JSON — skip
@@ -1011,23 +1111,91 @@ export default function StopDetailScreen() {
     }
   }
 
+  async function handleChoosePhoto(bookingType: 'transport' | 'accommodation') {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Photo library access required', 'Please enable photo library access in Settings.');
+      return;
+    }
+    const setter = bookingType === 'transport' ? setParsingTransport : setParsingAccommodation;
+    setter(true);
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.85,
+        base64: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      const base64 = await readUriAsBase64(asset.uri);
+      const booking = await parseBookingFile(base64, mediaType);
+      setParsedBooking(booking);
+      setPreviewVisible(true);
+    } catch (err: any) {
+      Alert.alert('Could not read photo', err?.message ?? 'Please try again.');
+    } finally {
+      setter(false);
+    }
+  }
+
+  async function handleTakePhoto(bookingType: 'transport' | 'accommodation') {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Camera access required', 'Please enable camera access in Settings.');
+      return;
+    }
+    const setter = bookingType === 'transport' ? setParsingTransport : setParsingAccommodation;
+    setter(true);
+    try {
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        quality: 0.85,
+        base64: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      const base64 = await readUriAsBase64(asset.uri);
+      const booking = await parseBookingFile(base64, mediaType);
+      setParsedBooking(booking);
+      setPreviewVisible(true);
+    } catch (err: any) {
+      Alert.alert('Could not take photo', err?.message ?? 'Please try again.');
+    } finally {
+      setter(false);
+    }
+  }
+
   // ── Save booking ──────────────────────────────────────────────────────────
 
   async function handleSave(booking: ParsedBooking, selectedStopId: string | null) {
-    setSaving(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const userId = session?.user?.id;
       if (!userId) throw new Error('Not authenticated.');
+
+      const duplicate = await checkDuplicate(booking, userId);
+      if (duplicate) {
+        const proceed = await confirmDuplicate(duplicate);
+        if (!proceed) return; // keep the sheet open
+      }
+
+      setSaving(true);
 
       if (booking.type === 'accommodation' && selectedStopId) {
         const { error: insertErr } = await supabase.from('accommodation').insert({
           stop_id: selectedStopId,
           owner_id: userId,
           name: booking.hotel_name,
+          address: booking.address || null,
           confirmation_ref: booking.booking_ref || null,
           check_in_date: booking.check_in_date || null,
           check_out_date: booking.check_out_date || null,
+          check_in: booking.check_in_time || null,
+          check_out: booking.check_out_time || null,
+          wifi_name: booking.wifi_name || null,
+          wifi_password: booking.wifi_password || null,
         });
         if (insertErr) throw new Error(insertErr.message);
 
@@ -1050,22 +1218,29 @@ export default function StopDetailScreen() {
       } else if (booking.type === 'transport') {
         const { data: inboundLegs } = await supabase
           .from('legs')
-          .select('id')
+          .select('id, from_stop:from_stop_id(city)')
           .eq('trip_id', stop?.trip_id ?? '')
           .eq('to_stop_id', selectedStopId ?? stop?.id ?? '');
 
         const matchedLeg = (inboundLegs ?? [])[0] as any;
 
         if (matchedLeg) {
-          const { error: lbErr } = await supabase.from('leg_bookings').insert({
-            leg_id: matchedLeg.id,
-            owner_id: userId,
+          await createTransportBooking({
+            tripId: stop!.trip_id,
+            legId: matchedLeg.id,
+            originCity: booking.origin_city ?? matchedLeg.from_stop?.city ?? '',
+            destinationCity: booking.destination_city ?? stop!.city ?? '',
+            userId,
             operator: booking.operator,
-            reference: booking.service_number,
+            serviceNumber: booking.service_number,
             seat: booking.seat,
-            confirmation_ref: booking.booking_ref,
+            confirmationRef: booking.booking_ref,
+            departureDate: booking.departure_date ?? null,
+            departureTime: booking.departure_time ?? null,
+            arrivalDate: booking.arrival_date ?? null,
+            arrivalTime: booking.arrival_time ?? null,
+            extraData: buildExtraData(booking) ?? undefined,
           });
-          if (lbErr) throw new Error(lbErr.message);
         } else {
           const transportLabel = booking.transport_type === 'flight' ? booking.service_number
             : booking.transport_type === 'train' ? `Train ${booking.service_number}`
@@ -1103,6 +1278,51 @@ export default function StopDetailScreen() {
           if (siErr) throw new Error(siErr.message);
         }
 
+      } else if (booking.type === 'connection') {
+        const firstLeg = booking.legs[0];
+        const lastLeg  = booking.legs[booking.legs.length - 1];
+
+        const { data: inboundLegs } = await supabase
+          .from('legs')
+          .select('id, from_stop:from_stop_id(city)')
+          .eq('trip_id', stop?.trip_id ?? '')
+          .eq('to_stop_id', selectedStopId ?? stop?.id ?? '');
+
+        const matchedLeg = (inboundLegs ?? [])[0] as any;
+
+        if (matchedLeg) {
+          await saveConnectionBooking({
+            tripId: stop!.trip_id,
+            legId: matchedLeg.id,
+            originCity: firstLeg?.origin_city ?? matchedLeg.from_stop?.city ?? '',
+            destinationCity: lastLeg?.destination_city ?? stop!.city ?? '',
+            userId,
+            confirmationRef: booking.booking_ref,
+            legs: booking.legs.map((leg) => ({
+              originCity: leg.origin_city,
+              destinationCity: leg.destination_city,
+              operator: leg.operator ?? null,
+              serviceNumber: leg.service_number ?? null,
+              seat: leg.seat ?? null,
+              legOrder: leg.leg_order,
+              departureDate: leg.departure_date ?? null,
+              departureTime: leg.departure_time ?? null,
+              arrivalDate: leg.arrival_date ?? null,
+              arrivalTime: leg.arrival_time ?? null,
+              extraData: buildExtraData(leg) ?? undefined,
+            })),
+          });
+        } else {
+          const { error: siErr } = await supabase.from('saved_items').insert({
+            stop_id: selectedStopId ?? stop?.id ?? null,
+            creator_id: userId,
+            name: `${firstLeg?.operator ?? ''} connection`.trim(),
+            category: 'Transport',
+            note: JSON.stringify({ is_connection: true, booking_ref: booking.booking_ref, legs: booking.legs }),
+          });
+          if (siErr) throw new Error(siErr.message);
+        }
+
       } else {
         const { error: siErr } = await supabase.from('saved_items').insert({
           stop_id: selectedStopId ?? stop?.id ?? null,
@@ -1121,6 +1341,61 @@ export default function StopDetailScreen() {
     } catch (err: any) {
       console.error('[handleSave] error:', err?.message);
       Alert.alert('Could not save booking', err?.message ?? 'Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── Manual accommodation save ─────────────────────────────────────────────
+
+  async function handleSaveManualAccommodation(
+    data: ManualAccommodationData,
+    stopId: string | null,
+  ) {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const userId = session?.user?.id;
+      if (!userId) throw new Error('Not authenticated.');
+
+      // Duplicate check using a minimal AccommodationBooking shape
+      const fakeBooking: AccommodationBooking = {
+        type: 'accommodation',
+        hotel_name: data.name,
+        address: data.address,
+        city: stop?.city ?? '',
+        check_in_date: data.check_in_date ?? '',
+        check_out_date: data.check_out_date ?? '',
+        booking_ref: data.confirmation_ref ?? '',
+        nights: null,
+      };
+      const duplicate = await checkDuplicate(fakeBooking, userId);
+      if (duplicate) {
+        const proceed = await confirmDuplicate(duplicate);
+        if (!proceed) return;
+      }
+
+      setSaving(true);
+      const targetStopId = stopId ?? stop?.id ?? null;
+      const { error: insertErr } = await supabase.from('accommodation').insert({
+        stop_id: targetStopId,
+        owner_id: userId,
+        name: data.name || null,
+        address: data.address || null,
+        check_in_date: data.check_in_date || null,
+        check_out_date: data.check_out_date || null,
+        check_in: data.check_in_time || null,
+        check_out: data.check_out_time || null,
+        confirmation_ref: data.confirmation_ref || null,
+        wifi_name: data.wifi_name || null,
+        wifi_password: data.wifi_password || null,
+        door_code: data.door_code || null,
+      });
+      if (insertErr) throw new Error(insertErr.message);
+
+      if (stop) await loadSavedBookings(stop);
+      setManualAccommodationSheetVisible(false);
+    } catch (err: any) {
+      Alert.alert('Could not save accommodation', err?.message ?? 'Please try again.');
     } finally {
       setSaving(false);
     }
@@ -1199,7 +1474,7 @@ export default function StopDetailScreen() {
         <LogisticsTab
           savedBookings={savedBookings}
           onPickTransport={() => setSourcePickerVisible(true)}
-          onPickAccommodation={() => handlePickFile('accommodation')}
+          onPickAccommodation={() => setAccommodationSourcePickerVisible(true)}
           onDevFlight={() => { setParsedBooking(DEV_FLIGHT); setPreviewVisible(true); }}
           onDevTrain={() => { setParsedBooking(DEV_TRAIN); setPreviewVisible(true); }}
           onDevAccommodation={() => { setParsedBooking(DEV_ACCOMMODATION); setPreviewVisible(true); }}
@@ -1238,11 +1513,25 @@ export default function StopDetailScreen() {
       />
 
       {/* Transport source picker */}
-      <TransportSourceModal
+      <SourcePickerModal
         visible={sourcePickerVisible}
-        onUpload={() => handlePickFile('transport')}
+        title="Add transport"
+        onUploadFile={() => handlePickFile('transport')}
+        onChoosePhoto={() => handleChoosePhoto('transport')}
+        onTakePhoto={() => handleTakePhoto('transport')}
         onManual={() => setManualSheetVisible(true)}
         onClose={() => setSourcePickerVisible(false)}
+      />
+
+      {/* Accommodation source picker */}
+      <SourcePickerModal
+        visible={accommodationSourcePickerVisible}
+        title="Add accommodation"
+        onUploadFile={() => handlePickFile('accommodation')}
+        onChoosePhoto={() => handleChoosePhoto('accommodation')}
+        onTakePhoto={() => handleTakePhoto('accommodation')}
+        onManual={() => setManualAccommodationSheetVisible(true)}
+        onClose={() => setAccommodationSourcePickerVisible(false)}
       />
 
       {/* Manual transport entry */}
@@ -1254,11 +1543,21 @@ export default function StopDetailScreen() {
         onDiscard={() => setManualSheetVisible(false)}
       />
 
+      {/* Manual accommodation entry */}
+      <ManualAccommodationSheet
+        visible={manualAccommodationSheetVisible}
+        stops={tripStops}
+        saving={saving}
+        onSave={handleSaveManualAccommodation}
+        onDiscard={() => setManualAccommodationSheetVisible(false)}
+      />
+
       {/* AI-parsed booking preview */}
       <BookingPreviewSheet
         visible={previewVisible}
         booking={parsedBooking}
         stops={tripStops}
+        legGaps={tripLegGaps}
         saving={saving}
         onSave={handleSave}
         onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); }}

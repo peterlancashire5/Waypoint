@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
@@ -22,8 +22,19 @@ import {
   mediaTypeFromUri,
   readUriAsBase64,
   type ParsedBooking,
+  type TransportBooking,
 } from '@/lib/claude';
-import BookingPreviewSheet, { type StopOption } from '@/components/BookingPreviewSheet';
+import { checkDuplicate, confirmDuplicate } from '@/lib/duplicateCheck';
+import {
+  createTransportBooking,
+  deleteTransportBooking,
+  saveConnectionBooking,
+  deleteConnectionBooking,
+  startIncompleteJourney,
+  addLegToJourney,
+  buildExtraData,
+} from '@/lib/journeyUtils';
+import BookingPreviewSheet, { type StopOption, type LegGapOption } from '@/components/BookingPreviewSheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,8 +44,22 @@ interface StopWithDates extends StopOption {
 }
 
 interface SavedRecord {
-  table: 'accommodation' | 'leg_bookings' | 'saved_items';
+  table: 'accommodation' | 'leg_bookings' | 'saved_items' | 'journeys' | 'journey_leg';
   id: string;
+  /** Extra context needed to undo a 'journey_leg' record. */
+  meta?: { journeyId: string; wasComplete: boolean };
+}
+
+/** An incomplete journey the user has already started — used for Scenario 2/3 detection. */
+interface IncompleteJourneyRecord {
+  id: string;
+  tripId: string;
+  legId: string;
+  originCity: string;
+  destinationCity: string;
+  /** Destination city of the last leg_booking in this journey. */
+  lastLegDestCity: string;
+  lastLegOrder: number;
 }
 
 // ─── Matching logic ───────────────────────────────────────────────────────────
@@ -61,24 +86,12 @@ interface MatchResult {
 function findBestMatch(stops: StopWithDates[], booking: ParsedBooking): MatchResult {
   if (stops.length === 0) return { stop: null, confident: false };
 
-  if (booking.type === 'transport') {
-    const destMatches = stops.filter((s) => cityMatches(s.city, booking.destination_city));
-    const originMatches = stops.filter((s) => cityMatches(s.city, booking.origin_city));
-
-    // Destination match with date → confident
-    for (const s of destMatches) {
-      if (datesWithin2Days(s.start_date, booking.arrival_date)) {
-        return { stop: s, confident: true };
-      }
-    }
-    // Destination match only → partial
-    if (destMatches.length > 0) return { stop: destMatches[0], confident: false };
-    // Origin match → partial
-    if (originMatches.length > 0) return { stop: originMatches[0], confident: false };
-
+  // Transport and connections use the leg gap picker — never auto-save.
+  if (booking.type === 'connection' || booking.type === 'transport') {
     return { stop: null, confident: false };
+  }
 
-  } else if (booking.type === 'accommodation') {
+  if (booking.type === 'accommodation') {
     const cityMatch = stops.filter((s) => cityMatches(s.city, booking.city));
     if (cityMatch.length === 0) return { stop: null, confident: false };
 
@@ -97,12 +110,21 @@ function findBestMatch(stops: StopWithDates[], booking: ParsedBooking): MatchRes
   }
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Returns the value only if it looks like HH:MM, otherwise null. */
+function safeTime(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return /^\d{2}:\d{2}/.test(value) ? value : null;
+}
+
 // ─── Save booking ─────────────────────────────────────────────────────────────
 
 async function saveBooking(
   booking: ParsedBooking,
   stopId: string | null,
   userId: string,
+  tripId?: string | null,
 ): Promise<SavedRecord | null> {
   if (booking.type === 'accommodation' && stopId) {
     const { data, error } = await supabase
@@ -111,9 +133,14 @@ async function saveBooking(
         stop_id: stopId,
         owner_id: userId,
         name: booking.hotel_name,
+        address: booking.address || null,
         confirmation_ref: booking.booking_ref || null,
-        check_in: booking.check_in_date || null,
-        check_out: booking.check_out_date || null,
+        check_in_date: booking.check_in_date || null,
+        check_out_date: booking.check_out_date || null,
+        check_in: booking.check_in_time || null,
+        check_out: booking.check_out_time || null,
+        wifi_name: booking.wifi_name || null,
+        wifi_password: booking.wifi_password || null,
       })
       .select('id')
       .single();
@@ -121,31 +148,29 @@ async function saveBooking(
     return { table: 'accommodation', id: (data as any).id };
 
   } else if (booking.type === 'transport' && stopId) {
-    // Try to match a leg by destination city
-    const { data: legs } = await supabase
+    // stopId is the to_stop_id of the selected leg gap; filter by tripId when known
+    const legQuery = supabase
       .from('legs')
-      .select('id, to_stop:to_stop_id(city)')
-      .limit(200);
+      .select('id, trip_id, from_stop:from_stop_id(city), to_stop:to_stop_id(city)')
+      .eq('to_stop_id', stopId);
+    const { data: legs } = await (tripId ? legQuery.eq('trip_id', tripId) : legQuery).limit(1);
 
-    const matchedLeg = (legs ?? []).find(
-      (l: any) => l.to_stop?.city?.toLowerCase() === booking.destination_city?.toLowerCase()
-    );
+    const matchedLeg = (legs ?? [])[0] ?? null;
 
     if (matchedLeg) {
-      const { data, error } = await supabase
-        .from('leg_bookings')
-        .insert({
-          leg_id: matchedLeg.id,
-          owner_id: userId,
-          operator: booking.operator,
-          reference: booking.service_number,
-          seat: booking.seat,
-          confirmation_ref: booking.booking_ref,
-        })
-        .select('id')
-        .single();
-      if (error || !data) throw new Error(error?.message ?? 'Save failed');
-      return { table: 'leg_bookings', id: (data as any).id };
+      const lbId = await createTransportBooking({
+        tripId: (matchedLeg as any).trip_id,
+        legId: matchedLeg.id,
+        originCity: booking.origin_city ?? (matchedLeg as any).from_stop?.city ?? '',
+        destinationCity: booking.destination_city ?? (matchedLeg as any).to_stop?.city ?? '',
+        userId,
+        operator: booking.operator,
+        serviceNumber: booking.service_number,
+        seat: booking.seat,
+        confirmationRef: booking.booking_ref,
+        extraData: buildExtraData(booking) ?? undefined,
+      });
+      return { table: 'leg_bookings', id: lbId };
     }
 
     const { data, error } = await supabase
@@ -167,7 +192,67 @@ async function saveBooking(
           arrival_time: booking.arrival_time,
           booking_ref: booking.booking_ref,
           seat: booking.seat,
+          gate: booking.gate,
+          terminal: booking.terminal,
+          coach: booking.coach,
+          platform: booking.platform,
+          origin_station: booking.origin_station,
+          destination_station: booking.destination_station,
+          pickup_point: booking.pickup_point,
+          dropoff_point: booking.dropoff_point,
+          deck: booking.deck,
+          cabin: booking.cabin,
+          port_terminal: booking.port_terminal,
         }),
+      })
+      .select('id')
+      .single();
+    if (error || !data) throw new Error(error?.message ?? 'Save failed');
+    return { table: 'saved_items', id: (data as any).id };
+
+  } else if (booking.type === 'connection' && stopId) {
+    const lastLeg = booking.legs[booking.legs.length - 1];
+    const firstLeg = booking.legs[0];
+
+    // stopId is the to_stop_id of the selected leg gap; filter by tripId when known
+    const connLegQuery = supabase
+      .from('legs')
+      .select('id, trip_id, from_stop:from_stop_id(city), to_stop:to_stop_id(city)')
+      .eq('to_stop_id', stopId);
+    const { data: legs } = await (tripId ? connLegQuery.eq('trip_id', tripId) : connLegQuery).limit(1);
+
+    const matchedLeg = (legs ?? [])[0] ?? null;
+
+    if (matchedLeg) {
+      const journeyId = await saveConnectionBooking({
+        tripId: (matchedLeg as any).trip_id,
+        legId: matchedLeg.id,
+        originCity: firstLeg?.origin_city ?? (matchedLeg as any).from_stop?.city ?? '',
+        destinationCity: lastLeg?.destination_city ?? (matchedLeg as any).to_stop?.city ?? '',
+        userId,
+        confirmationRef: booking.booking_ref,
+        legs: booking.legs.map((leg) => ({
+          originCity: leg.origin_city,
+          destinationCity: leg.destination_city,
+          operator: leg.operator ?? null,
+          serviceNumber: leg.service_number ?? null,
+          seat: leg.seat ?? null,
+          legOrder: leg.leg_order,
+          extraData: buildExtraData(leg) ?? undefined,
+        })),
+      });
+      return { table: 'journeys', id: journeyId };
+    }
+
+    // Fallback — save first leg as a saved_item
+    const { data, error } = await supabase
+      .from('saved_items')
+      .insert({
+        stop_id: stopId,
+        creator_id: userId,
+        name: `${firstLeg?.operator ?? ''} connection`.trim(),
+        category: 'Transport',
+        note: JSON.stringify({ is_connection: true, booking_ref: booking.booking_ref, legs: booking.legs }),
       })
       .select('id')
       .single();
@@ -191,19 +276,34 @@ async function saveBooking(
 }
 
 async function undoSave(record: SavedRecord): Promise<void> {
-  await supabase.from(record.table).delete().eq('id', record.id);
+  if (record.table === 'journeys') {
+    await deleteConnectionBooking(record.id);
+  } else if (record.table === 'journey_leg' && record.meta) {
+    // Undo an added leg: delete the leg_booking and revert is_complete
+    await supabase.from('leg_bookings').delete().eq('id', record.id);
+    await supabase.from('journeys')
+      .update({ is_complete: record.meta.wasComplete })
+      .eq('id', record.meta.journeyId);
+  } else if (record.table === 'leg_bookings') {
+    await deleteTransportBooking(record.id);
+  } else {
+    await supabase.from(record.table as any).delete().eq('id', record.id);
+  }
 }
+
 
 // ─── Source picker sheet ──────────────────────────────────────────────────────
 
 function SourcePickerSheet({
   visible,
   onUploadFile,
+  onChoosePhoto,
   onTakePhoto,
   onClose,
 }: {
   visible: boolean;
   onUploadFile: () => void;
+  onChoosePhoto: () => void;
   onTakePhoto: () => void;
   onClose: () => void;
 }) {
@@ -245,6 +345,20 @@ function SourcePickerSheet({
           <View style={sheetStyles.rowText}>
             <Text style={sheetStyles.rowLabel}>Upload file</Text>
             <Text style={sheetStyles.rowSub}>PDF, JPEG, or PNG confirmation</Text>
+          </View>
+          <Feather name="chevron-right" size={18} color={colors.border} />
+        </Pressable>
+
+        <Pressable
+          style={({ pressed }) => [sheetStyles.row, pressed && sheetStyles.rowPressed]}
+          onPress={() => { onClose(); setTimeout(onChoosePhoto, 300); }}
+        >
+          <View style={sheetStyles.iconWrap}>
+            <Feather name="image" size={20} color={colors.primary} />
+          </View>
+          <View style={sheetStyles.rowText}>
+            <Text style={sheetStyles.rowLabel}>Choose from photos</Text>
+            <Text style={sheetStyles.rowSub}>Pick from your camera roll</Text>
           </View>
           <Feather name="chevron-right" size={18} color={colors.border} />
         </Pressable>
@@ -394,39 +508,146 @@ export default function QuickCaptureFAB() {
   const [previewVisible, setPreviewVisible] = useState(false);
   const [saving, setSaving] = useState(false);
   const [allStops, setAllStops] = useState<StopWithDates[]>([]);
+  const [allLegGaps, setAllLegGaps] = useState<LegGapOption[]>([]);
+  const [allIncompleteJourneys, setAllIncompleteJourneys] = useState<IncompleteJourneyRecord[]>([]);
   const [stopsLoaded, setStopsLoaded] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [lastSaved, setLastSaved] = useState<SavedRecord | null>(null);
 
-  // ── Load all stops (once) ────────────────────────────────────────────────
+  // ── Load stops + leg gaps on mount ──────────────────────────────────────
+  //
+  // Gap options are derived from stop order rather than from the legs table.
+  // The legs table has an RLS edge-case (is_trip_member returns false for
+  // both flat and nested selects in this context) yielding empty results.
+  // Gaps are inferred by sorting each trip's stops by order_index and pairing
+  // consecutive entries — the gap id is the destination stop's id, which
+  // saveBooking already uses to look up the real leg via to_stop_id.
+  //
+  // A useRef guard ensures loadData runs exactly once even if state updates
+  // inside it trigger re-renders before the queries complete.
 
-  async function loadStops() {
-    if (stopsLoaded) return;
+  const dataLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (dataLoadedRef.current) return;
+    dataLoadedRef.current = true;
+    loadData();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function loadData() {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.user) return;
+    const userId = session.user.id;
 
-    const { data } = await supabase
+    // 1. Trips — needed for the trip name label in both pickers.
+    const { data: tripsData } = await supabase
+      .from('trips')
+      .select('id, name')
+      .limit(100);
+
+    const tripNameMap = new Map<string, string>();
+    for (const t of (tripsData as any[] ?? [])) {
+      tripNameMap.set(t.id, t.name ?? 'Trip');
+    }
+
+    // 2. Stops — include order_index so we can derive inter-stop gaps without
+    //    touching the legs table. Direct queries on legs hit an RLS edge-case
+    //    (is_trip_member returns false for flat/nested selects) yielding empty
+    //    results. Gaps are instead inferred from consecutive stop order.
+    const { data: stopsData } = await supabase
       .from('stops')
-      .select('id, city, start_date, end_date, trips(id, name, owner_id)')
+      .select('id, city, trip_id, order_index, start_date, end_date')
       .limit(200);
 
-    if (data) {
-      const stops: StopWithDates[] = (data as any[])
-        .filter((s) => s.trips?.owner_id === session.user.id)
-        .map((s) => ({
-          id: s.id,
-          city: s.city,
-          tripName: s.trips?.name ?? 'Trip',
-          start_date: s.start_date,
-          end_date: s.end_date,
-        }));
-      setAllStops(stops);
+    const stops: StopWithDates[] = [];
+    const stopsByTrip = new Map<string, Array<{ id: string; city: string; order_index: number | null }>>();
+
+    for (const s of (stopsData as any[] ?? [])) {
+      stops.push({
+        id: s.id,
+        city: s.city,
+        tripName: tripNameMap.get(s.trip_id) ?? 'Trip',
+        start_date: s.start_date,
+        end_date: s.end_date,
+      });
+      const bucket = stopsByTrip.get(s.trip_id) ?? [];
+      bucket.push({ id: s.id, city: s.city, order_index: s.order_index ?? 0 });
+      stopsByTrip.set(s.trip_id, bucket);
     }
+
+    // 3. Derive gap options from consecutive stops within each trip (tripId included).
+    const gaps: LegGapOption[] = [];
+    for (const [tripId, tripStops] of stopsByTrip) {
+      const sorted = tripStops.slice().sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+      const tripName = tripNameMap.get(tripId) ?? 'Trip';
+      for (let i = 1; i < sorted.length; i++) {
+        gaps.push({
+          id: sorted[i].id,
+          fromStopId: sorted[i - 1].id,
+          fromCity: sorted[i - 1].city,
+          toCity: sorted[i].city,
+          tripName,
+          tripId,
+        });
+      }
+    }
+
+    // 4. Incomplete journeys — needed for Scenario 2/3 connection detection.
+    //    Fetch journeys where is_complete=false, then grab the last leg_booking's
+    //    destination_city (populated since Phase 6 migration) to know where each
+    //    journey's last segment ended.
+    const { data: incomplJourneysData } = await supabase
+      .from('journeys')
+      .select('id, trip_id, leg_id, origin_city, destination_city')
+      .eq('is_complete', false)
+      .limit(50);
+
+    const journeyList = incomplJourneysData as any[] ?? [];
+    const incomplete: IncompleteJourneyRecord[] = [];
+
+    if (journeyList.length > 0) {
+      const journeyIds = journeyList.map((j: any) => j.id);
+      const { data: lastLegsData } = await supabase
+        .from('leg_bookings')
+        .select('journey_id, leg_order, destination_city')
+        .in('journey_id', journeyIds)
+        .eq('owner_id', userId)
+        .order('leg_order', { ascending: false });
+
+      // Build map: journeyId → highest-leg-order entry (first due to desc ordering)
+      const lastLegMap = new Map<string, { destCity: string; legOrder: number }>();
+      for (const lb of (lastLegsData as any[] ?? [])) {
+        if (!lastLegMap.has(lb.journey_id) && lb.destination_city) {
+          lastLegMap.set(lb.journey_id, {
+            destCity: lb.destination_city,
+            legOrder: lb.leg_order ?? 1,
+          });
+        }
+      }
+
+      for (const j of journeyList) {
+        const lastLeg = lastLegMap.get(j.id);
+        if (lastLeg) {
+          incomplete.push({
+            id: j.id,
+            tripId: j.trip_id,
+            legId: j.leg_id,
+            originCity: j.origin_city ?? '',
+            destinationCity: j.destination_city ?? '',
+            lastLegDestCity: lastLeg.destCity,
+            lastLegOrder: lastLeg.legOrder,
+          });
+        }
+      }
+    }
+
+    setAllStops(stops);
+    setAllLegGaps(gaps);
+    setAllIncompleteJourneys(incomplete);
     setStopsLoaded(true);
   }
 
   function handleFABPress() {
-    loadStops();
     setSheetVisible(true);
   }
 
@@ -481,43 +702,293 @@ export default function QuickCaptureFAB() {
     }
   }
 
-  // ── Matching + auto-save ─────────────────────────────────────────────────
+  async function handleChoosePhoto() {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Photo library access required', 'Please enable photo library access in Settings.');
+      return;
+    }
+
+    setParsing(true);
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.85,
+        base64: false,
+      });
+      if (result.canceled) return;
+
+      const asset = result.assets[0];
+      const mediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      const base64 = await readUriAsBase64(asset.uri);
+      const booking = await parseBookingFile(base64, mediaType);
+      await handleParsed(booking);
+    } catch (err: any) {
+      Alert.alert('Could not read photo', err?.message ?? 'Please try again.');
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  // ── Matching + connection detection ──────────────────────────────────────
 
   async function handleParsed(booking: ParsedBooking) {
+    // For single-segment transport bookings, run smart connection detection
+    // before falling through to the standard gap picker.
+    if (booking.type === 'transport') {
+      const originCity = booking.origin_city;
+      const destCity = booking.destination_city;
+
+      if (originCity && destCity) {
+        // Scenario 2/3: the booking's origin matches the last leg of an
+        // incomplete journey — prompt to add it as the next leg.
+        const journeyMatch = allIncompleteJourneys.find((j) =>
+          cityMatches(j.lastLegDestCity, originCity)
+        );
+        if (journeyMatch) {
+          showAddToJourneyPrompt(booking, journeyMatch);
+          return;
+        }
+
+        // Scenario 1: origin matches a gap's start city but destination
+        // doesn't match that gap's end city — might be a connection leg.
+        const partialGap = allLegGaps.find((g) =>
+          cityMatches(g.fromCity, originCity) && !cityMatches(g.toCity, destCity)
+        );
+        if (partialGap) {
+          showConnectionPrompt(booking, partialGap);
+          return;
+        }
+      }
+    }
+
+    // Standard flow: accommodation auto-saves when confident; everything
+    // else (or transport with a direct gap match) goes to the preview sheet.
     const { stop, confident } = findBestMatch(allStops, booking);
 
     if (confident && stop) {
-      // Auto-save
       try {
         const { data: { session } } = await supabase.auth.getSession();
         if (!session?.user) throw new Error('Not authenticated.');
+
+        const duplicate = await checkDuplicate(booking, session.user.id);
+        if (duplicate) {
+          const proceed = await confirmDuplicate(duplicate);
+          if (!proceed) return;
+        }
+
         const record = await saveBooking(booking, stop.id, session.user.id);
         if (record) setLastSaved(record);
         setToastMessage(`Saved to ${stop.city}`);
-      } catch (err: any) {
-        // Fall back to preview sheet on save failure
+      } catch {
         setParsedBooking(booking);
         setPreviewVisible(true);
       }
     } else {
-      // Show preview with best guess pre-selected
       setParsedBooking(booking);
       setPreviewVisible(true);
+    }
+  }
+
+  // ── Scenario 1: partial gap match ────────────────────────────────────────
+  // Origin matches a gap start but destination doesn't match the gap end.
+  // Prompt: is this the first leg of a connection to {gap.toCity}?
+
+  function showConnectionPrompt(booking: TransportBooking, gap: LegGapOption) {
+    Alert.alert(
+      'Connection to ' + gap.toCity + '?',
+      `This booking goes to ${booking.destination_city}, not ${gap.toCity}. Is it the first leg of a connection?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'No, save as standalone',
+          onPress: () => { setParsedBooking(booking); setPreviewVisible(true); },
+        },
+        {
+          text: `Yes, connection to ${gap.toCity}`,
+          onPress: () => handleStartConnection(booking, gap),
+        },
+      ],
+    );
+  }
+
+  async function handleStartConnection(booking: TransportBooking, gap: LegGapOption) {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return;
+
+    // Look up the actual leg record for this gap using both trip_id and to_stop_id.
+    // If the leg doesn't exist yet (create-trip only inserts stops, not legs),
+    // create it on demand so the journey can be saved with a valid leg_id.
+    let legId: string | null = null;
+    try {
+      const { data: legsData } = await supabase
+        .from('legs')
+        .select('id')
+        .eq('trip_id', gap.tripId)
+        .eq('to_stop_id', gap.id)
+        .limit(1);
+
+      legId = (legsData as any[])?.[0]?.id ?? null;
+
+      if (!legId) {
+        // Leg doesn't exist — create it now using the from/to stop IDs from the gap.
+        const { data: newLeg, error: legCreateErr } = await supabase
+          .from('legs')
+          .insert({
+            trip_id: gap.tripId,
+            from_stop_id: gap.fromStopId,
+            to_stop_id: gap.id,
+            transport_type: booking.transport_type,
+          })
+          .select('id')
+          .single();
+        if (legCreateErr || !newLeg) {
+          throw new Error(legCreateErr?.message ?? 'Could not create trip leg');
+        }
+        legId = (newLeg as any).id as string;
+      }
+    } catch (err: any) {
+      Alert.alert('Could not save', err?.message ?? 'Please try again.');
+      return;
+    }
+
+    try {
+      const journeyId = await startIncompleteJourney({
+        tripId: gap.tripId,
+        legId,
+        journeyOriginCity: gap.fromCity,
+        journeyDestinationCity: gap.toCity,
+        legOriginCity: booking.origin_city,
+        legDestinationCity: booking.destination_city,
+        userId: session.user.id,
+        operator: booking.operator,
+        serviceNumber: booking.service_number,
+        seat: booking.seat,
+        confirmationRef: booking.booking_ref,
+        departureDate: booking.departure_date ?? null,
+        departureTime: booking.departure_time ?? null,
+        arrivalDate: booking.arrival_date ?? null,
+        arrivalTime: booking.arrival_time ?? null,
+        extraData: buildExtraData(booking) ?? undefined,
+      });
+
+      // Update local state so a subsequent upload can detect the next leg
+      setAllIncompleteJourneys((prev) => [
+        ...prev,
+        {
+          id: journeyId,
+          tripId: gap.tripId,
+          legId,
+          originCity: gap.fromCity,
+          destinationCity: gap.toCity,
+          lastLegDestCity: booking.destination_city,
+          lastLegOrder: 1,
+        },
+      ]);
+
+      setLastSaved({ table: 'journeys', id: journeyId });
+      setToastMessage(`Started journey ${gap.fromCity} → ${gap.toCity}`);
+    } catch (err: any) {
+      Alert.alert('Could not save', err?.message ?? 'Please try again.');
+    }
+  }
+
+  // ── Scenario 2/3: incomplete journey match ────────────────────────────────
+  // Booking's origin matches where the last leg of an incomplete journey ended.
+  // Prompt: is this the next leg of that journey?
+
+  function showAddToJourneyPrompt(booking: TransportBooking, journey: IncompleteJourneyRecord) {
+    Alert.alert(
+      'Continue journey?',
+      `Is this the next leg of your ${journey.originCity} → ${journey.destinationCity} journey?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'No, save separately',
+          onPress: () => { setParsedBooking(booking); setPreviewVisible(true); },
+        },
+        {
+          text: 'Yes, add as next leg',
+          onPress: () => handleAddNextLeg(booking, journey),
+        },
+      ],
+    );
+  }
+
+  async function handleAddNextLeg(booking: TransportBooking, journey: IncompleteJourneyRecord) {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return;
+
+    const newLegOrder = journey.lastLegOrder + 1;
+    const isNowComplete = cityMatches(booking.destination_city, journey.destinationCity);
+
+    try {
+      const lbId = await addLegToJourney({
+        journeyId: journey.id,
+        legId: journey.legId,
+        userId: session.user.id,
+        originCity: booking.origin_city,
+        destinationCity: booking.destination_city,
+        operator: booking.operator,
+        serviceNumber: booking.service_number,
+        seat: booking.seat,
+        confirmationRef: booking.booking_ref ?? null,
+        legOrder: newLegOrder,
+        departureDate: booking.departure_date ?? null,
+        departureTime: booking.departure_time ?? null,
+        arrivalDate: booking.arrival_date ?? null,
+        arrivalTime: booking.arrival_time ?? null,
+        extraData: buildExtraData(booking) ?? undefined,
+        isComplete: isNowComplete,
+      });
+
+      // Update local incomplete journey state
+      setAllIncompleteJourneys((prev) =>
+        isNowComplete
+          ? prev.filter((j) => j.id !== journey.id)
+          : prev.map((j) =>
+              j.id === journey.id
+                ? { ...j, lastLegDestCity: booking.destination_city, lastLegOrder: newLegOrder }
+                : j
+            )
+      );
+
+      const toastText = isNowComplete
+        ? `Journey complete! ${journey.originCity} → ${journey.destinationCity}`
+        : `Leg added to ${journey.originCity} → ${journey.destinationCity} journey`;
+
+      setLastSaved({
+        table: 'journey_leg',
+        id: lbId,
+        meta: { journeyId: journey.id, wasComplete: false },
+      });
+      setToastMessage(toastText);
+    } catch (err: any) {
+      Alert.alert('Could not save', err?.message ?? 'Please try again.');
     }
   }
 
   // ── Manual save (from BookingPreviewSheet) ───────────────────────────────
 
   async function handleManualSave(booking: ParsedBooking, stopId: string | null) {
-    setSaving(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.user) throw new Error('Not authenticated.');
-      await saveBooking(booking, stopId, session.user.id);
+
+      const duplicate = await checkDuplicate(booking, session.user.id);
+      if (duplicate) {
+        const proceed = await confirmDuplicate(duplicate);
+        if (!proceed) return; // keep preview sheet open
+      }
+
+      setSaving(true);
+      const savedGap = allLegGaps.find((g) => g.id === stopId);
+      await saveBooking(booking, stopId, session.user.id, savedGap?.tripId ?? null);
       setPreviewVisible(false);
       setParsedBooking(null);
       const savedStop = allStops.find((s) => s.id === stopId);
-      if (savedStop) setToastMessage(`Saved to ${savedStop.city}`);
+      if (savedGap) setToastMessage(`Saved ${savedGap.fromCity} → ${savedGap.toCity}`);
+      else if (savedStop) setToastMessage(`Saved to ${savedStop.city}`);
     } catch (err: any) {
       Alert.alert('Could not save booking', err?.message ?? 'Please try again.');
     } finally {
@@ -559,6 +1030,7 @@ export default function QuickCaptureFAB() {
       <SourcePickerSheet
         visible={sheetVisible}
         onUploadFile={handleUploadFile}
+        onChoosePhoto={handleChoosePhoto}
         onTakePhoto={handleTakePhoto}
         onClose={() => setSheetVisible(false)}
       />
@@ -571,6 +1043,7 @@ export default function QuickCaptureFAB() {
         visible={previewVisible}
         booking={parsedBooking}
         stops={stopOptions}
+        legGaps={allLegGaps}
         saving={saving}
         onSave={handleManualSave}
         onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); }}

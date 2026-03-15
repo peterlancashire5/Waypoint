@@ -1,4 +1,4 @@
-import * as FileSystem from 'expo-file-system';
+import { File, Paths } from 'expo-file-system';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +27,7 @@ export interface TransportBooking {
   destination_station: string | null;
   // Bus
   pickup_point: string | null;
+  dropoff_point: string | null;
   // Ferry
   deck: string | null;
   cabin: string | null;
@@ -36,11 +37,16 @@ export interface TransportBooking {
 export interface AccommodationBooking {
   type: 'accommodation';
   hotel_name: string;
+  address: string | null;         // full street address
   city: string;
   check_in_date: string;          // YYYY-MM-DD
   check_out_date: string;
+  check_in_time: string | null;   // HH:MM (24h), e.g. "14:00"
+  check_out_time: string | null;  // HH:MM (24h), e.g. "11:00"
   booking_ref: string;
   nights: number | null;
+  wifi_name: string | null;
+  wifi_password: string | null;
 }
 
 export interface OtherBooking {
@@ -50,7 +56,41 @@ export interface OtherBooking {
   date: string | null;
 }
 
-export type ParsedBooking = TransportBooking | AccommodationBooking | OtherBooking;
+/** One leg within a connection/layover booking. Shares all transport fields. */
+export interface ConnectionLeg {
+  transport_type: TransportType;
+  operator: string;
+  service_number: string;
+  origin_city: string;
+  destination_city: string;
+  departure_date: string;         // YYYY-MM-DD
+  departure_time: string;         // HH:MM
+  arrival_date: string;
+  arrival_time: string;
+  seat: string | null;
+  gate: string | null;
+  terminal: string | null;
+  coach: string | null;
+  platform: string | null;
+  origin_station: string | null;
+  destination_station: string | null;
+  pickup_point: string | null;
+  dropoff_point: string | null;
+  deck: string | null;
+  cabin: string | null;
+  port_terminal: string | null;
+  leg_order: number;
+}
+
+/** Multi-leg journey sharing a single booking reference (e.g. a flight with a layover). */
+export interface ConnectionBooking {
+  type: 'connection';
+  is_connection: true;
+  booking_ref: string | null;
+  legs: ConnectionLeg[];
+}
+
+export type ParsedBooking = TransportBooking | AccommodationBooking | OtherBooking | ConnectionBooking;
 
 // Keep the old name exported so any remaining references don't break at runtime
 export type FlightBooking = TransportBooking;
@@ -74,14 +114,12 @@ export function mediaTypeFromUri(uri: string, mimeType?: string | null): Booking
 
 export async function readUriAsBase64(uri: string): Promise<string> {
   const ext = uri.split('.').pop()?.toLowerCase() ?? 'tmp';
-  const cacheUri = `${FileSystem.cacheDirectory}booking_${Date.now()}.${ext}`;
-  await FileSystem.copyAsync({ from: uri, to: cacheUri });
+  const cached = new File(Paths.cache, `booking_${Date.now()}.${ext}`);
+  new File(uri).copy(cached);
   try {
-    return await FileSystem.readAsStringAsync(cacheUri, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
+    return await cached.base64();
   } finally {
-    FileSystem.deleteAsync(cacheUri, { idempotent: true });
+    cached.delete();
   }
 }
 
@@ -94,22 +132,36 @@ const SYSTEM_PROMPT = `You are a travel booking parser. Extract structured data 
 
 Return ONLY valid JSON (no markdown, no explanation) in one of these exact formats:
 
-Transport booking:
-{"type":"transport","transport_type":"flight","operator":"...","service_number":"...","origin_city":"...","destination_city":"...","departure_date":"YYYY-MM-DD","departure_time":"HH:MM","arrival_date":"YYYY-MM-DD","arrival_time":"HH:MM","booking_ref":"...","seat":null,"gate":null,"terminal":null,"coach":null,"platform":null,"origin_station":null,"destination_station":null,"pickup_point":null,"deck":null,"cabin":null,"port_terminal":null}
+Single transport booking:
+{"type":"transport","transport_type":"flight","operator":"...","service_number":"...","origin_city":"...","destination_city":"...","departure_date":"YYYY-MM-DD","departure_time":"HH:MM","arrival_date":"YYYY-MM-DD","arrival_time":"HH:MM","booking_ref":"...","seat":null,"gate":null,"terminal":null,"coach":null,"platform":null,"origin_station":null,"destination_station":null,"pickup_point":null,"dropoff_point":null,"deck":null,"cabin":null,"port_terminal":null}
+
+Connection/layover booking (two or more legs on one itinerary):
+{"type":"connection","is_connection":true,"booking_ref":"...","legs":[{"transport_type":"flight","operator":"...","service_number":"...","origin_city":"...","destination_city":"...","departure_date":"YYYY-MM-DD","departure_time":"HH:MM","arrival_date":"YYYY-MM-DD","arrival_time":"HH:MM","seat":null,"gate":null,"terminal":null,"coach":null,"platform":null,"origin_station":null,"destination_station":null,"pickup_point":null,"dropoff_point":null,"deck":null,"cabin":null,"port_terminal":null,"leg_order":1},{"leg_order":2,...}]}
+
+Use the connection format when the document shows a multi-leg journey with a layover or connection — e.g. LHR→FRA→BKK on one booking, or a train journey with a required change. Each leg gets its own origin/destination, service number, and times. leg_order starts at 1.
 
 Detect transport_type from context clues:
 - "flight": airline name, boarding pass, airport, gate, terminal, IATA flight number (e.g. BA123, TG661)
 - "train": railway, rail, train number, coach/carriage, platform, station name
-- "bus": bus, coach, National Express, FlixBus, Megabus, pickup point
+- "bus": bus, coach, National Express, FlixBus, Megabus, pickup point, dropoff point
 - "ferry": ferry, ship, vessel, port, deck, cabin, crossing, nautical
 
 operator = company name (e.g. "Thai Airways", "Eurostar", "FlixBus", "Brittany Ferries")
 service_number = the service identifier (flight number, train number, route number)
 origin_city / destination_city = city names only, not airport/station codes
+pickup_point / dropoff_point = bus boarding and alighting locations (stop name, address, or terminal)
+origin_station / destination_station = train station names (e.g. "London St Pancras", "Paris Gare du Nord")
+platform = train platform number; coach = train coach/carriage number
+gate / terminal = flight gate and terminal identifiers
+deck / cabin / port_terminal = ferry-specific details
 Populate only the fields relevant to the detected type; set irrelevant fields to null.
 
 Accommodation booking:
-{"type":"accommodation","hotel_name":"...","city":"...","check_in_date":"YYYY-MM-DD","check_out_date":"YYYY-MM-DD","booking_ref":"...","nights":null}
+{"type":"accommodation","hotel_name":"...","address":"full street address or null","city":"...","check_in_date":"YYYY-MM-DD","check_out_date":"YYYY-MM-DD","check_in_time":"HH:MM or null","check_out_time":"HH:MM or null","booking_ref":"...","nights":null,"wifi_name":null,"wifi_password":null}
+
+address = full street address of the property (e.g. "Cankarjevo Nabrezje 27, Ljubljana, Slovenia"). Include street, number, and city/country if present. Set to null only if no address appears in the document.
+check_in_time / check_out_time = time of day in 24h HH:MM format (e.g. "14:00" for 2:00 PM, "11:00" for 11:00 AM). Convert 12h AM/PM to 24h. Set to null if not shown in the document.
+wifi_name / wifi_password = Wi-Fi credentials if present in the document (some Airbnb and hotel confirmations include these). Set to null if not shown.
 
 Other document:
 {"type":"other","description":"...","city":null,"date":null}
@@ -170,7 +222,24 @@ export async function parseBookingFile(
   const text: string = (data as any).content?.[0]?.text ?? '';
 
   try {
-    return JSON.parse(text) as ParsedBooking;
+    const raw = JSON.parse(text);
+
+    // Array response → normalise to ConnectionBooking
+    if (Array.isArray(raw)) {
+      const firstBookingRef = (raw[0] as any)?.booking_ref ?? null;
+      const legs: ConnectionLeg[] = raw.map((item: any, i: number) => ({
+        ...item,
+        leg_order: item.leg_order ?? i + 1,
+      }));
+      return {
+        type: 'connection',
+        is_connection: true,
+        booking_ref: firstBookingRef,
+        legs,
+      } as ConnectionBooking;
+    }
+
+    return raw as ParsedBooking;
   } catch {
     throw new Error('Could not parse booking details from this document.');
   }

@@ -433,7 +433,7 @@ export default function HomeScreen() {
             if (selectedStop) {
               router.push({ pathname: '/stop-detail', params: { stopId: selectedStop.id } });
             } else {
-              router.push({ pathname: '/trip-overview', params: { tripId: trip.id } });
+              router.push({ pathname: '/trip-detail', params: { tripId: trip.id } });
             }
           }}
         >

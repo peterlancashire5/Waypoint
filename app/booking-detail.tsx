@@ -16,6 +16,7 @@ import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import { deleteTransportBooking, deleteConnectionBooking } from '@/lib/journeyUtils';
 import { transportIcon } from '@/components/BookingPreviewSheet';
 import type { TransportType } from '@/lib/claude';
 
@@ -36,21 +37,45 @@ interface AccommodationRecord {
   door_code: string | null;
 }
 
-// Leg_bookings-backed flight (has a matched leg with ISO timestamps)
-interface FlightRecord {
+// Journey-backed leg_booking
+interface JourneyLegBooking {
   id: string;
-  leg_id: string;
+  journey_id: string | null;
   operator: string | null;
-  reference: string | null;
+  reference: string | null;   // service number
   seat: string | null;
   confirmation_ref: string | null;
-  leg: {
-    transport_type: string | null;
-    departure_time: string | null;
-    arrival_time: string | null;
-    from_stop: { city: string; country: string | null } | null;
-    to_stop: { city: string; country: string | null } | null;
-  } | null;
+  leg_order: number;
+  origin_city: string | null;
+  destination_city: string | null;
+  departure_date: string | null;
+  departure_time: string | null;
+  arrival_date: string | null;
+  arrival_time: string | null;
+  extra_data: Record<string, string | null> | null;
+}
+
+interface JourneyRecord {
+  id: string;
+  origin_city: string;
+  destination_city: string;
+}
+
+interface TripLeg {
+  transport_type: string | null;
+  departure_time: string | null;
+  arrival_time: string | null;
+  from_stop: { city: string; country: string | null } | null;
+  to_stop: { city: string; country: string | null } | null;
+}
+
+// Bundled state for journey-backed transport detail
+interface JourneyDetail {
+  journey: JourneyRecord | null;
+  legBookings: JourneyLegBooking[];
+  tripLeg: TripLeg | null;
+  /** id of the first leg_booking fetched (the one the user tapped) */
+  primaryLbId: string;
 }
 
 // Saved_items-backed transport (no matched leg; structured JSON in note)
@@ -67,6 +92,35 @@ interface SavedItemTransportRecord {
   arrival_time: string | null;
   booking_ref: string | null;
   seat: string | null;
+  // Flight
+  gate: string | null;
+  terminal: string | null;
+  // Train
+  coach: string | null;
+  platform: string | null;
+  origin_station: string | null;
+  destination_station: string | null;
+  // Bus
+  pickup_point: string | null;
+  dropoff_point: string | null;
+  // Ferry
+  deck: string | null;
+  cabin: string | null;
+  port_terminal: string | null;
+  is_connection: boolean;
+  legs?: Array<{
+    transport_type: TransportType;
+    operator: string | null;
+    service_number: string | null;
+    origin_city: string | null;
+    destination_city: string | null;
+    departure_date: string | null;
+    departure_time: string | null;
+    arrival_date: string | null;
+    arrival_time: string | null;
+    seat: string | null;
+    leg_order: number;
+  }>;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -310,19 +364,35 @@ function AccommodationDetail({
   );
 }
 
-// ─── Leg_bookings-backed flight detail ───────────────────────────────────────
+// ─── Single-leg journey detail ───────────────────────────────────────────────
 
-function FlightDetail({
-  record,
+function SingleLegJourneyDetail({
+  detail,
   onFieldSave,
+  onExtraFieldSave,
 }: {
-  record: FlightRecord;
-  onFieldSave: (field: keyof Pick<FlightRecord, 'operator' | 'reference' | 'seat' | 'confirmation_ref'>, value: string) => void;
+  detail: JourneyDetail;
+  onFieldSave: (lbId: string, field: 'operator' | 'reference' | 'seat' | 'confirmation_ref', value: string) => void;
+  onExtraFieldSave: (lbId: string, field: string, value: string) => void;
 }) {
-  const leg = record.leg;
-  const fromCity = leg?.from_stop?.city ?? '—';
-  const toCity = leg?.to_stop?.city ?? '—';
+  const leg = detail.tripLeg;
+  const lb = detail.legBookings[0];
+  const fromCity = detail.journey?.origin_city ?? leg?.from_stop?.city ?? '—';
+  const toCity = detail.journey?.destination_city ?? leg?.to_stop?.city ?? '—';
   const duration = computeIsoDuration(leg?.departure_time ?? null, leg?.arrival_time ?? null);
+  const transportType = leg?.transport_type ?? 'flight';
+  const extra = lb?.extra_data ?? {};
+
+  const serviceLabel = transportType === 'train' ? 'Train no.'
+    : transportType === 'bus' ? 'Service no.'
+    : transportType === 'ferry' ? 'Voyage no.'
+    : 'Flight no.';
+  const operatorLabel = transportType === 'train' ? 'Rail operator'
+    : transportType === 'bus' ? 'Bus operator'
+    : transportType === 'ferry' ? 'Ferry operator'
+    : 'Airline';
+
+  if (!lb) return null;
 
   return (
     <>
@@ -338,7 +408,7 @@ function FlightDetail({
         </View>
         <View style={styles.routeMiddle}>
           <View style={styles.routeLine} />
-          <Feather name="send" size={14} color={colors.primary} style={styles.routeIcon} />
+          <Feather name={transportIcon(transportType)} size={14} color={colors.primary} style={styles.routeIcon} />
           {duration ? <Text style={styles.routeDuration}>{duration}</Text> : null}
         </View>
         <View style={[styles.routeEndpoint, styles.routeEndpointRight]}>
@@ -351,53 +421,417 @@ function FlightDetail({
         </View>
       </View>
 
-      <SectionHeading label="Flight details" />
+      <SectionHeading label="Journey details" />
       <View style={styles.card}>
-        <ReadOnlyRow label="Transport" value={leg?.transport_type ?? null} />
-        <View style={styles.divider} />
         <EditableRow
-          label="Airline / Operator"
-          value={record.operator}
-          placeholder="e.g. Thai Airways"
-          onSave={(v) => onFieldSave('operator', v)}
+          label={operatorLabel}
+          value={lb.operator}
+          placeholder="Operator name"
+          onSave={(v) => onFieldSave(lb.id, 'operator', v)}
         />
         <View style={styles.divider} />
         <EditableRow
-          label="Flight number"
-          value={record.reference}
-          placeholder="e.g. TG661"
-          onSave={(v) => onFieldSave('reference', v)}
+          label={serviceLabel}
+          value={lb.reference}
+          placeholder="Service number"
+          onSave={(v) => onFieldSave(lb.id, 'reference', v)}
         />
+        {/* Flight-specific */}
+        {transportType === 'flight' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="Gate" value={extra.gate ?? null} placeholder="e.g. B12"
+              onSave={(v) => onExtraFieldSave(lb.id, 'gate', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Terminal" value={extra.terminal ?? null} placeholder="e.g. Terminal 2"
+              onSave={(v) => onExtraFieldSave(lb.id, 'terminal', v)} />
+          </>
+        )}
+        {/* Train-specific */}
+        {transportType === 'train' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="From station" value={extra.origin_station ?? null} placeholder="Departure station"
+              onSave={(v) => onExtraFieldSave(lb.id, 'origin_station', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="To station" value={extra.destination_station ?? null} placeholder="Arrival station"
+              onSave={(v) => onExtraFieldSave(lb.id, 'destination_station', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Platform" value={extra.platform ?? null} placeholder="e.g. 5"
+              onSave={(v) => onExtraFieldSave(lb.id, 'platform', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Coach" value={extra.coach ?? null} placeholder="e.g. Coach B"
+              onSave={(v) => onExtraFieldSave(lb.id, 'coach', v)} />
+          </>
+        )}
+        {/* Bus-specific */}
+        {transportType === 'bus' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="Pickup point" value={extra.pickup_point ?? null} placeholder="Boarding location"
+              onSave={(v) => onExtraFieldSave(lb.id, 'pickup_point', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Dropoff point" value={extra.dropoff_point ?? null} placeholder="Alighting location"
+              onSave={(v) => onExtraFieldSave(lb.id, 'dropoff_point', v)} />
+          </>
+        )}
+        {/* Ferry-specific */}
+        {transportType === 'ferry' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="Deck" value={extra.deck ?? null} placeholder="e.g. Deck 7"
+              onSave={(v) => onExtraFieldSave(lb.id, 'deck', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Cabin" value={extra.cabin ?? null} placeholder="Cabin number"
+              onSave={(v) => onExtraFieldSave(lb.id, 'cabin', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Port/terminal" value={extra.port_terminal ?? null} placeholder="Port or terminal name"
+              onSave={(v) => onExtraFieldSave(lb.id, 'port_terminal', v)} />
+          </>
+        )}
       </View>
 
       <SectionHeading label="Booking" />
       <View style={styles.card}>
         <EditableRow
           label="Seat"
-          value={record.seat}
+          value={lb.seat}
           placeholder="e.g. 14A"
-          onSave={(v) => onFieldSave('seat', v)}
+          onSave={(v) => onFieldSave(lb.id, 'seat', v)}
         />
         <View style={styles.divider} />
         <EditableRow
           label="Booking ref"
-          value={record.confirmation_ref}
+          value={lb.confirmation_ref}
           placeholder="Confirmation reference"
-          onSave={(v) => onFieldSave('confirmation_ref', v)}
+          onSave={(v) => onFieldSave(lb.id, 'confirmation_ref', v)}
         />
       </View>
     </>
   );
 }
 
+// ─── Connection leg card ──────────────────────────────────────────────────────
+
+function inferTransportType(extra: Record<string, string | null>): string {
+  if (extra.gate != null || extra.terminal != null) return 'flight';
+  if (extra.platform != null || extra.coach != null || extra.origin_station != null) return 'train';
+  if (extra.pickup_point != null || extra.dropoff_point != null) return 'bus';
+  if (extra.deck != null || extra.cabin != null || extra.port_terminal != null) return 'ferry';
+  return 'flight';
+}
+
+function ConnectionLegCard({
+  lb,
+  legNumber,
+  totalLegs,
+  onFieldSave,
+  onExtraFieldSave,
+}: {
+  lb: JourneyLegBooking;
+  legNumber: number;
+  totalLegs: number;
+  onFieldSave: (lbId: string, field: 'operator' | 'reference' | 'seat' | 'confirmation_ref', value: string) => void;
+  onExtraFieldSave: (lbId: string, field: string, value: string) => void;
+}) {
+  const extra = lb.extra_data ?? {};
+  const transportType = inferTransportType(extra);
+  const hasTrainFields = transportType === 'train';
+  const hasBusFields = transportType === 'bus';
+  const hasFerryFields = transportType === 'ferry';
+  const hasFlightFields = transportType === 'flight';
+
+  const fromCity = lb.origin_city ?? '—';
+  const toCity = lb.destination_city ?? '—';
+  const hasTimes = lb.departure_time || lb.arrival_time;
+
+  const serviceLabel = transportType === 'train' ? 'Train no.'
+    : transportType === 'bus' ? 'Service no.'
+    : transportType === 'ferry' ? 'Voyage no.'
+    : 'Flight no.';
+
+  return (
+    <View style={styles.card}>
+      {/* Per-leg route header */}
+      <View style={styles.connLegRouteHeader}>
+        <View style={styles.connLegRouteLeft}>
+          <Text style={styles.connLegLabel}>Leg {legNumber} of {totalLegs}</Text>
+          <View style={styles.connLegRouteRow}>
+            <Text style={styles.connLegCity}>{fromCity}</Text>
+            <Feather name="arrow-right" size={12} color={colors.textMuted} style={{ marginHorizontal: 4 }} />
+            <Text style={styles.connLegCity}>{toCity}</Text>
+          </View>
+        </View>
+        {hasTimes ? (
+          <View style={styles.connLegTimes}>
+            <Text style={styles.connLegTime}>{lb.departure_time || '—'}</Text>
+            <Text style={styles.connLegTimeArrow}>→</Text>
+            <Text style={styles.connLegTime}>{lb.arrival_time || '—'}</Text>
+          </View>
+        ) : null}
+      </View>
+      <View style={styles.divider} />
+
+      {lb.departure_date ? (
+        <>
+          <ReadOnlyRow
+            label="Departure"
+            value={`${shortDate(lb.departure_date)}${lb.departure_time ? '  ' + lb.departure_time : ''}`}
+          />
+          <View style={styles.divider} />
+        </>
+      ) : null}
+      {lb.arrival_date ? (
+        <>
+          <ReadOnlyRow
+            label="Arrival"
+            value={`${shortDate(lb.arrival_date)}${lb.arrival_time ? '  ' + lb.arrival_time : ''}`}
+          />
+          <View style={styles.divider} />
+        </>
+      ) : null}
+
+      <EditableRow
+        label="Operator"
+        value={lb.operator}
+        placeholder="e.g. Trenitalia"
+        onSave={(v) => onFieldSave(lb.id, 'operator', v)}
+      />
+      <View style={styles.divider} />
+      <EditableRow
+        label={serviceLabel}
+        value={lb.reference}
+        placeholder="e.g. FR 9624"
+        onSave={(v) => onFieldSave(lb.id, 'reference', v)}
+      />
+      <View style={styles.divider} />
+      <EditableRow
+        label="Seat"
+        value={lb.seat}
+        placeholder="e.g. 14A"
+        onSave={(v) => onFieldSave(lb.id, 'seat', v)}
+      />
+      <View style={styles.divider} />
+      <EditableRow
+        label="Booking ref"
+        value={lb.confirmation_ref}
+        placeholder="Confirmation reference"
+        onSave={(v) => onFieldSave(lb.id, 'confirmation_ref', v)}
+      />
+      {hasFlightFields && (
+        <>
+          <View style={styles.divider} />
+          <EditableRow label="Gate" value={extra.gate ?? null} placeholder="e.g. B12"
+            onSave={(v) => onExtraFieldSave(lb.id, 'gate', v)} />
+          <View style={styles.divider} />
+          <EditableRow label="Terminal" value={extra.terminal ?? null} placeholder="e.g. Terminal 2"
+            onSave={(v) => onExtraFieldSave(lb.id, 'terminal', v)} />
+        </>
+      )}
+      {hasTrainFields && (
+        <>
+          <View style={styles.divider} />
+          <EditableRow label="From station" value={extra.origin_station ?? null} placeholder="Departure station"
+            onSave={(v) => onExtraFieldSave(lb.id, 'origin_station', v)} />
+          <View style={styles.divider} />
+          <EditableRow label="To station" value={extra.destination_station ?? null} placeholder="Arrival station"
+            onSave={(v) => onExtraFieldSave(lb.id, 'destination_station', v)} />
+          <View style={styles.divider} />
+          <EditableRow label="Platform" value={extra.platform ?? null} placeholder="e.g. 5"
+            onSave={(v) => onExtraFieldSave(lb.id, 'platform', v)} />
+          <View style={styles.divider} />
+          <EditableRow label="Coach" value={extra.coach ?? null} placeholder="e.g. Coach B"
+            onSave={(v) => onExtraFieldSave(lb.id, 'coach', v)} />
+        </>
+      )}
+      {hasBusFields && (
+        <>
+          <View style={styles.divider} />
+          <EditableRow label="Pickup point" value={extra.pickup_point ?? null} placeholder="Boarding location"
+            onSave={(v) => onExtraFieldSave(lb.id, 'pickup_point', v)} />
+          <View style={styles.divider} />
+          <EditableRow label="Dropoff point" value={extra.dropoff_point ?? null} placeholder="Alighting location"
+            onSave={(v) => onExtraFieldSave(lb.id, 'dropoff_point', v)} />
+        </>
+      )}
+      {hasFerryFields && (
+        <>
+          <View style={styles.divider} />
+          <EditableRow label="Deck" value={extra.deck ?? null} placeholder="e.g. Deck 7"
+            onSave={(v) => onExtraFieldSave(lb.id, 'deck', v)} />
+          <View style={styles.divider} />
+          <EditableRow label="Cabin" value={extra.cabin ?? null} placeholder="Cabin number"
+            onSave={(v) => onExtraFieldSave(lb.id, 'cabin', v)} />
+          <View style={styles.divider} />
+          <EditableRow label="Port/terminal" value={extra.port_terminal ?? null} placeholder="Port or terminal name"
+            onSave={(v) => onExtraFieldSave(lb.id, 'port_terminal', v)} />
+        </>
+      )}
+    </View>
+  );
+}
+
+// ─── Connection journey detail ────────────────────────────────────────────────
+
+function ConnectionJourneyDetail({
+  detail,
+  onFieldSave,
+  onExtraFieldSave,
+}: {
+  detail: JourneyDetail;
+  onFieldSave: (lbId: string, field: 'operator' | 'reference' | 'seat' | 'confirmation_ref', value: string) => void;
+  onExtraFieldSave: (lbId: string, field: string, value: string) => void;
+}) {
+  const legs = detail.legBookings;
+  const firstLeg = legs[0];
+  const lastLeg  = legs[legs.length - 1];
+
+  // Build the ordered list of cities for the route graphic:
+  // [ origin, ...layover cities, destination ]
+  const routeCities: string[] = [];
+  for (let i = 0; i < legs.length; i++) {
+    if (i === 0) routeCities.push(legs[i].origin_city ?? detail.journey?.origin_city ?? '—');
+    routeCities.push(legs[i].destination_city ?? (i === legs.length - 1 ? detail.journey?.destination_city : null) ?? '—');
+  }
+
+  // First leg departure and last leg arrival for the hero card
+  const depTime = firstLeg?.departure_time ?? null;
+  const depDate = firstLeg?.departure_date ?? null;
+  const arrTime = lastLeg?.arrival_time ?? null;
+  const arrDate = lastLeg?.arrival_date ?? null;
+
+  // Infer transport type from first leg's extra_data (or tripLeg)
+  const transportType = detail.tripLeg?.transport_type
+    ?? inferTransportType(firstLeg?.extra_data ?? {});
+
+  return (
+    <>
+      {/* Overall route hero — shows all cities as a chain */}
+      <View style={styles.routeCard}>
+        {/* Departure */}
+        <View style={styles.routeEndpoint}>
+          <Text style={styles.routeCity}>{routeCities[0]}</Text>
+          {depTime ? <Text style={styles.routeTime}>{depTime}</Text> : null}
+          {depDate ? <Text style={styles.routeDate}>{shortDate(depDate)}</Text> : null}
+        </View>
+
+        {/* Middle section: line + icon + intermediate stops + n-legs label */}
+        <View style={[styles.routeMiddle, { flex: 1 }]}>
+          <View style={styles.connRouteChain}>
+            {routeCities.slice(1, -1).map((city, i) => (
+              <View key={i} style={styles.connRouteStop}>
+                <View style={styles.connRouteDot} />
+                <Text style={styles.connRouteStopLabel} numberOfLines={1}>{city}</Text>
+              </View>
+            ))}
+          </View>
+          <View style={styles.routeLine} />
+          <Feather name={transportIcon(transportType)} size={14} color={colors.primary} style={styles.routeIcon} />
+          <Text style={styles.routeDuration}>{legs.length} legs</Text>
+        </View>
+
+        {/* Arrival */}
+        <View style={[styles.routeEndpoint, styles.routeEndpointRight]}>
+          <Text style={styles.routeCity}>{routeCities[routeCities.length - 1]}</Text>
+          {arrTime ? <Text style={styles.routeTime}>{arrTime}</Text> : null}
+          {arrDate ? <Text style={styles.routeDate}>{shortDate(arrDate)}</Text> : null}
+        </View>
+      </View>
+
+      <SectionHeading label="Booking details" />
+      {legs.map((lb, i) => (
+        <ConnectionLegCard
+          key={lb.id}
+          lb={lb}
+          legNumber={i + 1}
+          totalLegs={legs.length}
+          onFieldSave={onFieldSave}
+          onExtraFieldSave={onExtraFieldSave}
+        />
+      ))}
+    </>
+  );
+}
+
+// ─── Saved_items connection detail (read-only) ───────────────────────────────
+
+function SavedItemConnectionDetail({ record }: { record: SavedItemTransportRecord }) {
+  const firstLeg = record.legs?.[0];
+  const lastLeg = record.legs?.[record.legs.length - 1];
+  const fromCity = firstLeg?.origin_city ?? '—';
+  const toCity = lastLeg?.destination_city ?? '—';
+
+  return (
+    <>
+      <View style={styles.routeCard}>
+        <View style={styles.routeEndpoint}>
+          <Text style={styles.routeCity}>{fromCity}</Text>
+        </View>
+        <View style={styles.routeMiddle}>
+          <View style={styles.routeLine} />
+          <Feather name="send" size={14} color={colors.primary} style={styles.routeIcon} />
+          <Text style={styles.routeDuration}>{record.legs?.length ?? 0} legs</Text>
+        </View>
+        <View style={[styles.routeEndpoint, styles.routeEndpointRight]}>
+          <Text style={styles.routeCity}>{toCity}</Text>
+        </View>
+      </View>
+      {record.booking_ref ? (
+        <>
+          <SectionHeading label="Booking reference" />
+          <View style={styles.card}>
+            <ReadOnlyRow label="Ref" value={record.booking_ref} />
+          </View>
+        </>
+      ) : null}
+      <SectionHeading label="Legs" />
+      {(record.legs ?? []).map((leg, i) => (
+        <View key={i} style={styles.card}>
+          <View style={{ paddingHorizontal: 16, paddingVertical: 10 }}>
+            <Text style={styles.connLegLabel}>Leg {leg.leg_order ?? i + 1}</Text>
+          </View>
+          <View style={styles.divider} />
+          <ReadOnlyRow label="Operator" value={leg.operator} />
+          <View style={styles.divider} />
+          <ReadOnlyRow label="Service no." value={leg.service_number} />
+          <View style={styles.divider} />
+          <ReadOnlyRow label="From" value={leg.origin_city} />
+          <View style={styles.divider} />
+          <ReadOnlyRow label="To" value={leg.destination_city} />
+          {leg.departure_date ? (
+            <>
+              <View style={styles.divider} />
+              <ReadOnlyRow label="Departure" value={`${shortDate(leg.departure_date)}${leg.departure_time ? ' · ' + leg.departure_time : ''}`} />
+            </>
+          ) : null}
+          {leg.arrival_date ? (
+            <>
+              <View style={styles.divider} />
+              <ReadOnlyRow label="Arrival" value={`${shortDate(leg.arrival_date)}${leg.arrival_time ? ' · ' + leg.arrival_time : ''}`} />
+            </>
+          ) : null}
+          {leg.seat ? (
+            <>
+              <View style={styles.divider} />
+              <ReadOnlyRow label="Seat" value={leg.seat} />
+            </>
+          ) : null}
+        </View>
+      ))}
+    </>
+  );
+}
+
 // ─── Saved_items-backed transport detail ─────────────────────────────────────
+
+type SavedItemEditableField = 'transport_type' | 'operator' | 'service_number' | 'origin_city' | 'destination_city' | 'departure_date' | 'departure_time' | 'arrival_date' | 'arrival_time' | 'booking_ref' | 'seat' | 'gate' | 'terminal' | 'coach' | 'platform' | 'origin_station' | 'destination_station' | 'pickup_point' | 'dropoff_point' | 'deck' | 'cabin' | 'port_terminal';
 
 function SavedItemTransportDetail({
   record,
   onFieldSave,
 }: {
   record: SavedItemTransportRecord;
-  onFieldSave: (field: keyof SavedItemTransportRecord, value: string) => void;
+  onFieldSave: (field: SavedItemEditableField, value: string) => void;
 }) {
   const fromCity = record.origin_city ?? '—';
   const toCity = record.destination_city ?? '—';
@@ -452,6 +886,59 @@ function SavedItemTransportDetail({
           placeholder="Date · time"
           onSave={(v) => onFieldSave('arrival_date', v)}
         />
+        {/* Flight-specific */}
+        {record.transport_type === 'flight' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="Gate" value={record.gate} placeholder="e.g. B12"
+              onSave={(v) => onFieldSave('gate', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Terminal" value={record.terminal} placeholder="e.g. Terminal 2"
+              onSave={(v) => onFieldSave('terminal', v)} />
+          </>
+        )}
+        {/* Train-specific */}
+        {record.transport_type === 'train' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="From station" value={record.origin_station} placeholder="Departure station"
+              onSave={(v) => onFieldSave('origin_station', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="To station" value={record.destination_station} placeholder="Arrival station"
+              onSave={(v) => onFieldSave('destination_station', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Platform" value={record.platform} placeholder="e.g. 5"
+              onSave={(v) => onFieldSave('platform', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Coach" value={record.coach} placeholder="e.g. Coach B"
+              onSave={(v) => onFieldSave('coach', v)} />
+          </>
+        )}
+        {/* Bus-specific */}
+        {record.transport_type === 'bus' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="Pickup point" value={record.pickup_point} placeholder="Boarding location"
+              onSave={(v) => onFieldSave('pickup_point', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Dropoff point" value={record.dropoff_point} placeholder="Alighting location"
+              onSave={(v) => onFieldSave('dropoff_point', v)} />
+          </>
+        )}
+        {/* Ferry-specific */}
+        {record.transport_type === 'ferry' && (
+          <>
+            <View style={styles.divider} />
+            <EditableRow label="Deck" value={record.deck} placeholder="e.g. Deck 7"
+              onSave={(v) => onFieldSave('deck', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Cabin" value={record.cabin} placeholder="Cabin number"
+              onSave={(v) => onFieldSave('cabin', v)} />
+            <View style={styles.divider} />
+            <EditableRow label="Port/terminal" value={record.port_terminal} placeholder="Port or terminal name"
+              onSave={(v) => onFieldSave('port_terminal', v)} />
+          </>
+        )}
       </View>
 
       <SectionHeading label="Booking" />
@@ -489,7 +976,7 @@ export default function BookingDetailScreen() {
   const [deleting, setDeleting] = useState(false);
 
   const [accommodation, setAccommodation] = useState<AccommodationRecord | null>(null);
-  const [flight, setFlight] = useState<FlightRecord | null>(null);
+  const [journeyDetail, setJourneyDetail] = useState<JourneyDetail | null>(null);
   const [savedItemTransport, setSavedItemTransport] = useState<SavedItemTransportRecord | null>(null);
 
   // ── Fetch record ────────────────────────────────────────────────────────────
@@ -530,31 +1017,72 @@ export default function BookingDetailScreen() {
               transport_type: parsed.transport_type ?? 'flight',
               operator: parsed.operator ?? parsed.airline ?? null,
               service_number: parsed.service_number ?? parsed.flight_number ?? null,
-              origin_city: parsed.origin_city ?? null,
-              destination_city: parsed.destination_city ?? null,
+              origin_city: parsed.is_connection ? (parsed.legs?.[0]?.origin_city ?? null) : (parsed.origin_city ?? null),
+              destination_city: parsed.is_connection
+                ? (parsed.legs?.[parsed.legs.length - 1]?.destination_city ?? null)
+                : (parsed.destination_city ?? null),
               departure_date: parsed.departure_date ?? null,
               departure_time: parsed.departure_time ?? null,
               arrival_date: parsed.arrival_date ?? null,
               arrival_time: parsed.arrival_time ?? null,
               booking_ref: parsed.booking_ref ?? null,
               seat: parsed.seat ?? null,
+              gate: parsed.gate ?? null,
+              terminal: parsed.terminal ?? null,
+              coach: parsed.coach ?? null,
+              platform: parsed.platform ?? null,
+              origin_station: parsed.origin_station ?? null,
+              destination_station: parsed.destination_station ?? null,
+              pickup_point: parsed.pickup_point ?? null,
+              dropoff_point: parsed.dropoff_point ?? null,
+              deck: parsed.deck ?? null,
+              cabin: parsed.cabin ?? null,
+              port_terminal: parsed.port_terminal ?? null,
+              is_connection: parsed.is_connection === true,
+              legs: parsed.is_connection ? parsed.legs : undefined,
             });
           } catch {
             setError('Could not parse transport details.');
           }
         }
       } else {
-        // Flight from leg_bookings
-        const { data, error: fetchErr } = await supabase
+        // Journey-backed transport from leg_bookings
+        const { data: lb, error: lbErr } = await supabase
           .from('leg_bookings')
-          .select('id, leg_id, operator, reference, seat, confirmation_ref, leg:leg_id(transport_type, departure_time, arrival_time, from_stop:from_stop_id(city, country), to_stop:to_stop_id(city, country))')
+          .select('id, journey_id, leg_id, operator, reference, seat, confirmation_ref, leg_order, origin_city, destination_city, departure_date, departure_time, arrival_date, arrival_time, extra_data')
           .eq('id', id)
           .single();
-        if (fetchErr || !data) {
-          setError('Could not load flight details.');
-        } else {
-          setFlight(data as unknown as FlightRecord);
+
+        if (lbErr || !lb) {
+          setError('Could not load transport details.');
+          setLoading(false);
+          return;
         }
+
+        const journeyId: string | null = (lb as any).journey_id ?? null;
+        const legId: string = (lb as any).leg_id;
+
+        // Fetch trip leg (for route hero) and journey + sibling leg_bookings in parallel
+        const [tripLegResult, journeyResult, allLbResult] = await Promise.all([
+          supabase
+            .from('legs')
+            .select('transport_type, departure_time, arrival_time, from_stop:from_stop_id(city, country), to_stop:to_stop_id(city, country)')
+            .eq('id', legId)
+            .single(),
+          journeyId
+            ? supabase.from('journeys').select('id, origin_city, destination_city').eq('id', journeyId).single()
+            : Promise.resolve({ data: null, error: null }),
+          journeyId
+            ? supabase.from('leg_bookings').select('id, journey_id, operator, reference, seat, confirmation_ref, leg_order, origin_city, destination_city, departure_date, departure_time, arrival_date, arrival_time, extra_data').eq('journey_id', journeyId).order('leg_order', { ascending: true })
+            : Promise.resolve({ data: [lb], error: null }),
+        ]);
+
+        setJourneyDetail({
+          journey: (journeyResult as any).data as JourneyRecord | null,
+          legBookings: ((allLbResult as any).data ?? [lb]) as JourneyLegBooking[],
+          tripLeg: (tripLegResult as any).data as TripLeg | null,
+          primaryLbId: (lb as any).id,
+        });
       }
 
       setLoading(false);
@@ -578,24 +1106,56 @@ export default function BookingDetailScreen() {
     setAccommodation((prev) => prev ? { ...prev, [field]: storedValue } : prev);
   }
 
-  async function saveFlightField(
-    field: keyof Pick<FlightRecord, 'operator' | 'reference' | 'seat' | 'confirmation_ref'>,
+  async function saveLegBookingField(
+    lbId: string,
+    field: 'operator' | 'reference' | 'seat' | 'confirmation_ref',
     value: string,
   ) {
-    if (!flight) return;
     const storedValue = value === '' ? null : value;
     const { error: updateErr } = await supabase
       .from('leg_bookings')
       .update({ [field]: storedValue })
-      .eq('id', flight.id);
+      .eq('id', lbId);
     if (updateErr) {
       Alert.alert('Could not save', updateErr.message);
       return;
     }
-    setFlight((prev) => prev ? { ...prev, [field]: storedValue } : prev);
+    setJourneyDetail((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        legBookings: prev.legBookings.map((lb) =>
+          lb.id === lbId ? { ...lb, [field]: storedValue } : lb
+        ),
+      };
+    });
   }
 
-  async function saveSavedItemTransportField(field: keyof SavedItemTransportRecord, value: string) {
+  async function saveLegExtraField(lbId: string, field: string, value: string) {
+    const lb = journeyDetail?.legBookings.find((l) => l.id === lbId);
+    if (!lb) return;
+    const storedValue = value === '' ? null : value;
+    const updatedExtra = { ...(lb.extra_data ?? {}), [field]: storedValue };
+    const { error: updateErr } = await supabase
+      .from('leg_bookings')
+      .update({ extra_data: updatedExtra })
+      .eq('id', lbId);
+    if (updateErr) {
+      Alert.alert('Could not save', updateErr.message);
+      return;
+    }
+    setJourneyDetail((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        legBookings: prev.legBookings.map((l) =>
+          l.id === lbId ? { ...l, extra_data: updatedExtra } : l
+        ),
+      };
+    });
+  }
+
+  async function saveSavedItemTransportField(field: SavedItemEditableField, value: string) {
     if (!savedItemTransport) return;
     const storedValue = value === '' ? null : value;
     const updated = { ...savedItemTransport, [field]: storedValue };
@@ -611,6 +1171,17 @@ export default function BookingDetailScreen() {
       arrival_time: updated.arrival_time,
       booking_ref: updated.booking_ref,
       seat: updated.seat,
+      gate: updated.gate,
+      terminal: updated.terminal,
+      coach: updated.coach,
+      platform: updated.platform,
+      origin_station: updated.origin_station,
+      destination_station: updated.destination_station,
+      pickup_point: updated.pickup_point,
+      dropoff_point: updated.dropoff_point,
+      deck: updated.deck,
+      cabin: updated.cabin,
+      port_terminal: updated.port_terminal,
     });
     const name = [updated.operator, updated.service_number].filter(Boolean).join(' ') || 'Transport';
     const { error: updateErr } = await supabase
@@ -627,10 +1198,16 @@ export default function BookingDetailScreen() {
   // ── Delete booking ──────────────────────────────────────────────────────────
 
   function handleDeletePress() {
-    const label = type === 'accommodation' ? 'accommodation booking' : 'transport booking';
+    const isConnection = journeyDetail && journeyDetail.legBookings.length > 1;
+    const label = type === 'accommodation' ? 'accommodation booking'
+      : isConnection ? 'connection booking'
+      : 'transport booking';
+    const detail = isConnection
+      ? 'This will remove the entire connection including all legs.'
+      : 'This will permanently remove this booking.';
     Alert.alert(
       `Delete ${label}`,
-      'This will permanently remove this booking. Are you sure?',
+      `${detail} Are you sure?`,
       [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Delete', style: 'destructive', onPress: confirmDelete },
@@ -642,16 +1219,21 @@ export default function BookingDetailScreen() {
     if (!id) return;
     setDeleting(true);
     try {
-      let table: string;
       if (type === 'accommodation') {
-        table = 'accommodation';
+        const { error: deleteErr } = await supabase.from('accommodation').delete().eq('id', id);
+        if (deleteErr) throw new Error(deleteErr.message);
       } else if (source === 'saved_items') {
-        table = 'saved_items';
+        const { error: deleteErr } = await supabase.from('saved_items').delete().eq('id', id);
+        if (deleteErr) throw new Error(deleteErr.message);
       } else {
-        table = 'leg_bookings';
+        // Journey-backed: delete by journey_id (connection) or single lb
+        const journeyId = journeyDetail?.journey?.id ?? null;
+        if (journeyId && (journeyDetail?.legBookings.length ?? 0) > 1) {
+          await deleteConnectionBooking(journeyId);
+        } else {
+          await deleteTransportBooking(journeyDetail?.primaryLbId ?? id);
+        }
       }
-      const { error: deleteErr } = await supabase.from(table).delete().eq('id', id);
-      if (deleteErr) throw new Error(deleteErr.message);
       router.back();
     } catch (err: any) {
       Alert.alert('Could not delete', err?.message ?? 'Please try again.');
@@ -668,9 +1250,12 @@ export default function BookingDetailScreen() {
       const to = savedItemTransport.destination_city ?? '—';
       return `${from} → ${to}`;
     }
-    const from = flight?.leg?.from_stop?.city ?? '—';
-    const to = flight?.leg?.to_stop?.city ?? '—';
-    return `${from} → ${to}`;
+    if (journeyDetail) {
+      const from = journeyDetail.journey?.origin_city ?? journeyDetail.tripLeg?.from_stop?.city ?? '—';
+      const to = journeyDetail.journey?.destination_city ?? journeyDetail.tripLeg?.to_stop?.city ?? '—';
+      return `${from} → ${to}`;
+    }
+    return 'Transport';
   }
 
   function getSubtitle(): string | null {
@@ -678,7 +1263,13 @@ export default function BookingDetailScreen() {
     if (savedItemTransport) {
       return [savedItemTransport.operator, savedItemTransport.service_number].filter(Boolean).join(' · ') || null;
     }
-    return [flight?.operator, flight?.reference].filter(Boolean).join(' · ') || null;
+    if (journeyDetail) {
+      const isConnection = journeyDetail.legBookings.length > 1;
+      if (isConnection) return `Connection · ${journeyDetail.legBookings.length} legs`;
+      const lb = journeyDetail.legBookings[0];
+      return [lb?.operator, lb?.reference].filter(Boolean).join(' · ') || null;
+    }
+    return null;
   }
 
   // ── Render states ───────────────────────────────────────────────────────────
@@ -692,7 +1283,7 @@ export default function BookingDetailScreen() {
     );
   }
 
-  if (error || (!accommodation && !flight && !savedItemTransport)) {
+  if (error || (!accommodation && !journeyDetail && !savedItemTransport)) {
     return (
       <View style={styles.container}>
         <StatusBar style="dark" />
@@ -747,17 +1338,26 @@ export default function BookingDetailScreen() {
             onFieldSave={saveAccommodationField}
           />
         )}
-        {type === 'transport' && flight && (
-          <FlightDetail
-            record={flight}
-            onFieldSave={saveFlightField}
-          />
+        {type === 'transport' && journeyDetail && (
+          journeyDetail.legBookings.length > 1
+            ? <ConnectionJourneyDetail
+                detail={journeyDetail}
+                onFieldSave={saveLegBookingField}
+                onExtraFieldSave={saveLegExtraField}
+              />
+            : <SingleLegJourneyDetail
+                detail={journeyDetail}
+                onFieldSave={saveLegBookingField}
+                onExtraFieldSave={saveLegExtraField}
+              />
         )}
         {type === 'transport' && savedItemTransport && (
-          <SavedItemTransportDetail
-            record={savedItemTransport}
-            onFieldSave={saveSavedItemTransportField}
-          />
+          savedItemTransport.is_connection && savedItemTransport.legs
+            ? <SavedItemConnectionDetail record={savedItemTransport} />
+            : <SavedItemTransportDetail
+                record={savedItemTransport}
+                onFieldSave={saveSavedItemTransportField}
+              />
         )}
 
         {/* TODO: PDF link — store pdf_uri in accommodation / leg_bookings / saved_items
@@ -897,6 +1497,34 @@ const styles = StyleSheet.create({
   },
   editIcon: { marginLeft: 4 },
   divider: { height: 1, backgroundColor: colors.border, marginHorizontal: 16 },
+
+  // Connection leg card
+  connLegRouteHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 12, gap: 12,
+  },
+  connLegRouteLeft: { flex: 1, gap: 4 },
+  connLegLabel: {
+    fontFamily: fonts.bodyBold, fontSize: 11, color: colors.textMuted,
+    letterSpacing: 0.8, textTransform: 'uppercase',
+  },
+  connLegRouteRow: { flexDirection: 'row', alignItems: 'center' },
+  connLegCity: { fontFamily: fonts.displayBold, fontSize: 16, color: colors.text, letterSpacing: -0.1 },
+  connLegTimes: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  connLegTime: { fontFamily: fonts.bodyBold, fontSize: 16, color: colors.primary },
+  connLegTimeArrow: { fontFamily: fonts.body, fontSize: 12, color: colors.textMuted },
+
+  // Connection route chain (intermediate stops in route hero)
+  connRouteChain: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginBottom: 4 },
+  connRouteStop: { alignItems: 'center', gap: 2 },
+  connRouteDot: {
+    width: 6, height: 6, borderRadius: 3,
+    backgroundColor: colors.primary, opacity: 0.5,
+  },
+  connRouteStopLabel: {
+    fontFamily: fonts.body, fontSize: 10, color: colors.textMuted, maxWidth: 60,
+    textAlign: 'center',
+  },
 
   // Delete section
   deleteSection: { marginTop: 12, marginBottom: 8 },

@@ -67,6 +67,31 @@ const FIELDS: FieldDef[] = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Normalises free-text date input to YYYY-MM-DD.
+ * Accepts: YYYY-MM-DD (unchanged), DD/MM/YYYY, MM/DD/YYYY.
+ * When DD vs MM is ambiguous (both ≤ 12), treats as DD/MM/YYYY.
+ */
+function normalizeDate(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const m = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) {
+    const aNum = parseInt(m[1], 10);
+    const bNum = parseInt(m[2], 10);
+    const year = m[3];
+    let day: number, month: number;
+    if (aNum > 12) { day = aNum; month = bNum; }         // DD/MM unambiguous
+    else if (bNum > 12) { month = aNum; day = bNum; }    // MM/DD unambiguous
+    else { day = aNum; month = bNum; }                   // ambiguous → DD/MM
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  return trimmed;
+}
+
+const DATE_KEYS = new Set<string>(['departure_date', 'arrival_date']);
+
 function emptyTransport(transport_type: TransportType): TransportBooking {
   return {
     type: 'transport',
@@ -128,7 +153,8 @@ export default function ManualTransportSheet({
       const k = field.key as string;
       if (seenKeys.has(k)) continue; // operator/service_number appear twice; take first
       seenKeys.add(k);
-      const v = (values[k] ?? '').trim();
+      const raw = (values[k] ?? '').trim();
+      const v = DATE_KEYS.has(k) ? normalizeDate(raw) : raw;
       (booking as any)[k] = v || null;
     }
     // seat is special: typed as string | null but in values as string
