@@ -1,6 +1,5 @@
 import React, { useState, useRef } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   View,
   Text,
@@ -19,6 +18,8 @@ import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import CityAutocomplete from '@/components/CityAutocomplete';
+import type { CityResult } from '@/components/CityAutocomplete';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,35 +28,10 @@ type TripType = 'single' | 'multi';
 interface TripStop {
   id: string;
   city: string;
+  country: string | null;
   nights: string;
   lat: number | null;
   lng: number | null;
-  geocoding: boolean;
-}
-
-interface GeoResult {
-  lat: number;
-  lng: number;
-  name: string;
-}
-
-// ─── Geocoding ────────────────────────────────────────────────────────────────
-
-async function geocodeCity(name: string, signal?: AbortSignal): Promise<GeoResult | null> {
-  try {
-    const encoded = encodeURIComponent(name.trim());
-    const res = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encoded}&count=1&language=en&format=json`,
-      { signal },
-    );
-    if (!res.ok) return null;
-    const json = await res.json();
-    const r = json?.results?.[0];
-    if (!r) return null;
-    return { lat: r.latitude, lng: r.longitude, name: r.name };
-  } catch {
-    return null;
-  }
 }
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
@@ -278,7 +254,7 @@ function Step2({ tripType, onSelect, onBack }: {
 function Step3Single({
   destination, setDestination, arrivalDate, setArrivalDate,
   departureDate, setDepartureDate, departureDateUnknown, setDepartureDateUnknown,
-  geocodingDestination, onDestinationBlur, onNext, onBack,
+  onCitySelect, onNext, onBack,
 }: {
   destination: string;
   setDestination: (v: string) => void;
@@ -288,8 +264,7 @@ function Step3Single({
   setDepartureDate: (v: string) => void;
   departureDateUnknown: boolean;
   setDepartureDateUnknown: (v: boolean) => void;
-  geocodingDestination: boolean;
-  onDestinationBlur: () => void;
+  onCitySelect: (result: CityResult) => void;
   onNext: () => void;
   onBack: () => void;
 }) {
@@ -303,21 +278,16 @@ function Step3Single({
 
         {/* City */}
         <View>
-          <View style={styles.dateLabelRow}>
-            <Text style={styles.fieldLabel}>Destination</Text>
-            {geocodingDestination && (
-              <ActivityIndicator size="small" color={colors.textMuted} />
-            )}
-          </View>
-          <TextInput
-            style={styles.titleInput}
+          <Text style={styles.fieldLabel}>Destination</Text>
+          <CityAutocomplete
             value={destination}
             onChangeText={setDestination}
-            onBlur={onDestinationBlur}
+            onSelect={onCitySelect}
             placeholder="e.g. Barcelona"
             placeholderTextColor={colors.border}
             autoFocus
             returnKeyType="done"
+            style={styles.titleInput}
           />
           <View style={[styles.titleUnderline, destination.length > 0 && styles.titleUnderlineActive]} />
         </View>
@@ -372,7 +342,7 @@ function Step3Single({
 
 function Step3Multi({
   tripStartDate, setTripStartDate, stops, onAdd, onRemove, onUpdate, onMove,
-  onCityBlur, onNext, onBack,
+  onCitySelect, onNext, onBack,
 }: {
   tripStartDate: string;
   setTripStartDate: (v: string) => void;
@@ -381,7 +351,7 @@ function Step3Multi({
   onRemove: (id: string) => void;
   onUpdate: (id: string, field: 'city' | 'nights', value: string) => void;
   onMove: (id: string, dir: 'up' | 'down') => void;
-  onCityBlur: (id: string) => void;
+  onCitySelect: (id: string, result: CityResult) => void;
   onNext: () => void;
   onBack: () => void;
 }) {
@@ -420,25 +390,23 @@ function Step3Multi({
             {stops.map((stop, index) => {
               const range = stopDateRange(tripStartDate, stops, index);
               return (
-                <View key={stop.id} style={styles.stopCard}>
+                <View key={stop.id} style={[styles.stopCard, { zIndex: stops.length - index }]}>
                   {/* City row */}
                   <View style={styles.stopCardTop}>
                     <View style={styles.stopIndex}>
                       <Text style={styles.stopIndexText}>{index + 1}</Text>
                     </View>
-                    <TextInput
-                      style={styles.stopCityInput}
+                    <CityAutocomplete
                       value={stop.city}
                       onChangeText={(v) => onUpdate(stop.id, 'city', v)}
-                      onBlur={() => onCityBlur(stop.id)}
+                      onSelect={(result) => onCitySelect(stop.id, result)}
                       placeholder="City name"
                       placeholderTextColor={colors.border}
                       autoFocus={index === stops.length - 1 && stop.city === ''}
                       returnKeyType="done"
+                      containerStyle={styles.stopCityContainer}
+                      style={styles.stopCityInput}
                     />
-                    {stop.geocoding && (
-                      <ActivityIndicator size="small" color={colors.textMuted} style={styles.stopGeoSpinner} />
-                    )}
                     <View style={styles.stopReorder}>
                       <Pressable onPress={() => onMove(stop.id, 'up')} disabled={index === 0} hitSlop={4}>
                         <Feather name="chevron-up" size={15} color={index === 0 ? colors.border : colors.textMuted} />
@@ -636,9 +604,7 @@ export default function CreateTripModal() {
 
   // Single destination state
   const [destination, setDestination] = useState('');
-  const [destinationGeo, setDestinationGeo] = useState<GeoResult | null>(null);
-  const [geocodingDestination, setGeocodingDestination] = useState(false);
-  const destGeoAbort = useRef<AbortController | null>(null);
+  const [destinationGeo, setDestinationGeo] = useState<{ country: string | null; lat: number | null; lng: number | null } | null>(null);
 
   const [arrivalDate, setArrivalDate] = useState('');
   const [departureDate, setDepartureDate] = useState('');
@@ -647,7 +613,6 @@ export default function CreateTripModal() {
   // Multi-stop state
   const [tripStartDate, setTripStartDate] = useState('');
   const [stops, setStops] = useState<TripStop[]>([]);
-  const stopGeoAborts = useRef<Record<string, AbortController>>({});
 
   const [saving, setSaving] = useState(false);
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -663,38 +628,24 @@ export default function CreateTripModal() {
     });
   };
 
-  // ── Destination (single) change + blur ────────────────────────────────────
+  // ── Destination (single) change + select ──────────────────────────────────
 
   const handleDestinationChange = (v: string) => {
     setDestination(v);
     setDestinationGeo(null); // clear stale geo when user edits
   };
 
-  const handleDestinationBlur = async () => {
-    const name = destination.trim();
-    if (!name) return;
-
-    destGeoAbort.current?.abort();
-    const controller = new AbortController();
-    destGeoAbort.current = controller;
-
-    setGeocodingDestination(true);
-    const result = await geocodeCity(name, controller.signal);
-
-    if (!controller.signal.aborted) {
-      setDestinationGeo(result);
-      setGeocodingDestination(false);
-    }
+  const handleDestinationSelect = (result: CityResult) => {
+    setDestination(result.city);
+    setDestinationGeo({ country: result.country, lat: result.lat, lng: result.lng });
   };
 
   // ── Stop management (multi) ────────────────────────────────────────────────
 
   const addStop = () =>
-    setStops((prev) => [...prev, { id: Date.now().toString(), city: '', nights: '', lat: null, lng: null, geocoding: false }]);
+    setStops((prev) => [...prev, { id: Date.now().toString(), city: '', country: null, nights: '', lat: null, lng: null }]);
 
   const removeStop = (id: string) => {
-    stopGeoAborts.current[id]?.abort();
-    delete stopGeoAborts.current[id];
     setStops((prev) => prev.filter((s) => s.id !== id));
   };
 
@@ -702,31 +653,16 @@ export default function CreateTripModal() {
     setStops((prev) => prev.map((s) => {
       if (s.id !== id) return s;
       // Clear stale geo whenever the city text changes
-      if (field === 'city') return { ...s, city: value, lat: null, lng: null };
+      if (field === 'city') return { ...s, city: value, country: null, lat: null, lng: null };
       return { ...s, [field]: value };
     }));
 
-  const handleCityBlur = async (id: string) => {
-    const stop = stops.find((s) => s.id === id);
-    if (!stop || !stop.city.trim()) return;
-    const cityAtBlur = stop.city.trim();
-
-    stopGeoAborts.current[id]?.abort();
-    const controller = new AbortController();
-    stopGeoAborts.current[id] = controller;
-
-    setStops((prev) => prev.map((s) => s.id === id ? { ...s, geocoding: true } : s));
-
-    const result = await geocodeCity(cityAtBlur, controller.signal);
-
-    if (!controller.signal.aborted) {
-      setStops((prev) => prev.map((s) => {
-        if (s.id !== id) return s;
-        // Discard if user changed the city while we were geocoding
-        if (s.city.trim() !== cityAtBlur) return { ...s, geocoding: false };
-        return { ...s, geocoding: false, lat: result?.lat ?? null, lng: result?.lng ?? null };
-      }));
-    }
+  const handleCitySelect = (id: string, result: CityResult) => {
+    setStops((prev) => prev.map((s) =>
+      s.id === id
+        ? { ...s, city: result.city, country: result.country, lat: result.lat, lng: result.lng }
+        : s
+    ));
   };
 
   const moveStop = (id: string, dir: 'up' | 'down') => {
@@ -786,7 +722,8 @@ export default function CreateTripModal() {
 
       await supabase.from('stops').insert({
         trip_id: trip.id,
-        city: destinationGeo?.name ?? destination,
+        city: destination,
+        country: destinationGeo?.country ?? null,
         latitude: destinationGeo?.lat ?? null,
         longitude: destinationGeo?.lng ?? null,
         order_index: 0,
@@ -846,6 +783,7 @@ export default function CreateTripModal() {
         return {
           trip_id: trip.id,
           city: s.city,
+          country: s.country ?? null,
           latitude: s.lat ?? null,
           longitude: s.lng ?? null,
           nights,
@@ -903,8 +841,7 @@ export default function CreateTripModal() {
                 departureDate={departureDate} setDepartureDate={setDepartureDate}
                 departureDateUnknown={departureDateUnknown}
                 setDepartureDateUnknown={setDepartureDateUnknown}
-                geocodingDestination={geocodingDestination}
-                onDestinationBlur={handleDestinationBlur}
+                onCitySelect={handleDestinationSelect}
                 onNext={() => goTo(4)} onBack={() => goTo(2)}
               />
             )}
@@ -914,7 +851,7 @@ export default function CreateTripModal() {
                 tripStartDate={tripStartDate} setTripStartDate={setTripStartDate}
                 stops={stops} onAdd={addStop} onRemove={removeStop}
                 onUpdate={updateStop} onMove={moveStop}
-                onCityBlur={handleCityBlur}
+                onCitySelect={handleCitySelect}
                 onNext={() => goTo(4)} onBack={() => goTo(2)}
               />
             )}
@@ -1055,15 +992,17 @@ const styles = StyleSheet.create({
     backgroundColor: colors.white, borderRadius: 12,
     borderWidth: 1, borderColor: colors.border,
     paddingHorizontal: 12, paddingTop: 4, paddingBottom: 10,
+    overflow: 'visible',
   },
-  stopCardTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  stopCardTop: { flexDirection: 'row', alignItems: 'center', gap: 10, overflow: 'visible' },
   stopIndex: {
     width: 22, height: 22, borderRadius: 11,
     backgroundColor: '#EBF3F6', alignItems: 'center', justifyContent: 'center',
   },
   stopIndexText: { fontFamily: fonts.bodyBold, fontSize: 11, color: colors.primary },
+  stopCityContainer: { flex: 1 },
   stopCityInput: {
-    flex: 1, fontFamily: fonts.body, fontSize: 15, color: colors.text, paddingVertical: 10,
+    fontFamily: fonts.body, fontSize: 15, color: colors.text, paddingVertical: 10,
   },
   stopGeoSpinner: { marginRight: 2 },
   stopReorder: { alignItems: 'center', gap: 2 },

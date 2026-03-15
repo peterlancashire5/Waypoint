@@ -19,6 +19,7 @@ import { fonts } from '@/constants/typography';
 import type { ParsedBooking, TransportBooking, TransportType } from '@/lib/claude';
 import { transportIcon } from './BookingPreviewSheet';
 import type { StopOption } from './BookingPreviewSheet';
+import CityAutocomplete from './CityAutocomplete';
 
 // ─── Transport type selector ──────────────────────────────────────────────────
 
@@ -226,25 +227,51 @@ export default function ManualTransportSheet({
           >
             {/* Fields */}
             <View style={styles.card}>
-              {activeFields.map((field, i) => (
-                <View key={field.key as string + i}>
-                  {i > 0 && <View style={styles.divider} />}
-                  <View style={styles.fieldRow}>
-                    <Text style={styles.fieldLabel}>{field.label}</Text>
-                    <TextInput
-                      style={styles.fieldInput}
-                      value={values[field.key as string] ?? ''}
-                      onChangeText={(v) =>
-                        setValues((prev) => ({ ...prev, [field.key as string]: v }))
-                      }
-                      placeholder={field.placeholder}
-                      placeholderTextColor={colors.border}
-                      keyboardType={field.keyboard === 'numbers-and-punctuation' ? 'numbers-and-punctuation' : 'default'}
-                      returnKeyType="next"
-                    />
+              {activeFields.map((field, i) => {
+                const key = field.key as string;
+                const isCityField = key === 'origin_city' || key === 'destination_city';
+                // origin_city (i=0) must render above destination_city (i=1)
+                const cityZIndex = key === 'origin_city' ? 2 : key === 'destination_city' ? 1 : undefined;
+                return (
+                  <View
+                    key={key + i}
+                    style={isCityField ? { overflow: 'visible', zIndex: cityZIndex } : undefined}
+                  >
+                    {i > 0 && <View style={styles.divider} />}
+                    <View style={[styles.fieldRow, isCityField && styles.fieldRowCity]}>
+                      <Text style={styles.fieldLabel}>{field.label}</Text>
+                      {isCityField ? (
+                        <CityAutocomplete
+                          value={values[key] ?? ''}
+                          onChangeText={(v) =>
+                            setValues((prev) => ({ ...prev, [key]: v }))
+                          }
+                          onSelect={({ city }) =>
+                            setValues((prev) => ({ ...prev, [key]: city }))
+                          }
+                          placeholder={field.placeholder}
+                          placeholderTextColor={colors.border}
+                          returnKeyType="next"
+                          containerStyle={styles.cityInputContainer}
+                          style={styles.cityInput}
+                        />
+                      ) : (
+                        <TextInput
+                          style={styles.fieldInput}
+                          value={values[key] ?? ''}
+                          onChangeText={(v) =>
+                            setValues((prev) => ({ ...prev, [key]: v }))
+                          }
+                          placeholder={field.placeholder}
+                          placeholderTextColor={colors.border}
+                          keyboardType={field.keyboard === 'numbers-and-punctuation' ? 'numbers-and-punctuation' : 'default'}
+                          returnKeyType="next"
+                        />
+                      )}
+                    </View>
                   </View>
-                </View>
-              ))}
+                );
+              })}
             </View>
 
             {/* Stop selector */}
@@ -362,13 +389,15 @@ const styles = StyleSheet.create({
   // Field card
   card: {
     backgroundColor: colors.white, borderRadius: 14, marginBottom: 20,
-    borderWidth: 1, borderColor: colors.border, overflow: 'hidden',
+    borderWidth: 1, borderColor: colors.border, overflow: 'visible',
   },
   divider: { height: 1, backgroundColor: colors.border, marginHorizontal: 16 },
   fieldRow: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 16, paddingVertical: 13, gap: 12,
   },
+  // City field rows need overflow: visible so the dropdown escapes the card
+  fieldRowCity: { overflow: 'visible' },
   fieldLabel: {
     fontFamily: fonts.body, fontSize: 14, color: colors.textMuted,
     width: 120, flexShrink: 0,
@@ -376,6 +405,12 @@ const styles = StyleSheet.create({
   fieldInput: {
     flex: 1, fontFamily: fonts.body, fontSize: 14, color: colors.text,
     textAlign: 'right', padding: 0,
+  },
+  // City autocomplete container takes flex space; input mirrors fieldInput alignment
+  cityInputContainer: { flex: 1, overflow: 'visible' },
+  cityInput: {
+    fontFamily: fonts.body, fontSize: 14, color: colors.text,
+    textAlign: 'right', padding: 0, width: '100%',
   },
 
   // Stop selector
