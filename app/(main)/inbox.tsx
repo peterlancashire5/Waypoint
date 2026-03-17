@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
@@ -21,7 +21,6 @@ import {
 import { useInboxCount } from '@/lib/inboxCount';
 import type { PlaceCategory } from '@/lib/placesEnrichment';
 import QuickCaptureFAB from '@/components/QuickCaptureFAB';
-import PlaceDetailSheet from '@/components/PlaceDetailSheet';
 
 // ─── Category config ──────────────────────────────────────────────────────────
 
@@ -107,14 +106,11 @@ function EmptyState() {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function InboxScreen() {
+  const router = useRouter();
   const { setInboxCount } = useInboxCount();
 
   const [items, setItems] = useState<SavedPlace[]>([]);
   const [loading, setLoading] = useState(true);
-
-  // Detail sheet state
-  const [selectedPlace, setSelectedPlace] = useState<SavedPlace | null>(null);
-  const [detailVisible, setDetailVisible] = useState(false);
 
   // ── Load inbox items ────────────────────────────────────────────────────────
 
@@ -182,35 +178,11 @@ export default function InboxScreen() {
             <InboxRow
               key={place.id}
               place={place}
-              onPress={() => { setSelectedPlace(place); setDetailVisible(true); }}
+              onPress={() => router.push({ pathname: '/place-detail', params: { placeId: place.id } })}
             />
           ))}
         </ScrollView>
       )}
-
-      {/* Place detail sheet */}
-      <PlaceDetailSheet
-        visible={detailVisible}
-        place={selectedPlace}
-        canMoveToInbox={false}
-        onClose={() => setDetailVisible(false)}
-        onUpdated={(updated) => {
-          setItems((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-          setDetailVisible(false);
-        }}
-        onDeleted={(placeId) => {
-          const next = items.filter((p) => p.id !== placeId);
-          setItems(next);
-          setInboxCount(next.length);
-          setDetailVisible(false);
-        }}
-        onMoved={(placeId) => {
-          const next = items.filter((p) => p.id !== placeId);
-          setItems(next);
-          setInboxCount(next.length);
-          setDetailVisible(false);
-        }}
-      />
 
       <QuickCaptureFAB />
     </View>

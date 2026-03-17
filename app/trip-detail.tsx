@@ -1,24 +1,33 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   View,
   Text,
   StyleSheet,
   Pressable,
   ScrollView,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import DraggableFlatList, {
+  ScaleDecorator,
+  type RenderItemParams,
+} from 'react-native-draggable-flatlist';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
 import { createTransportBooking } from '@/lib/journeyUtils';
 import { transportIcon } from '@/components/BookingPreviewSheet';
 import ManualTransportSheet from '@/components/ManualTransportSheet';
+import AddStopSheet from '@/components/AddStopSheet';
+import type { PendingStop } from '@/components/AddStopSheet';
 import type { StopOption } from '@/components/BookingPreviewSheet';
 import type { ParsedBooking } from '@/lib/claude';
 
@@ -70,6 +79,18 @@ type ItineraryItem =
   | { kind: 'stop'; stop: DbStop; stopIndex: number }
   | { kind: 'leg'; leg: DbLeg; fromCity: string; toCity: string; transport: TransportItem[] }
   | { kind: 'gap'; fromCity: string; toCity: string; toStopId: string; transport: TransportItem[] };
+
+// A stop as represented in local edit state
+interface EditableStop {
+  tempId: string;          // stable key for list rendering
+  dbId: string | null;     // null = new stop not yet saved
+  city: string;
+  country: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -125,7 +146,6 @@ function buildItinerary(
       const toStop = stops[i + 1];
       const key = `${fromStop.id}:${toStop.id}`;
       const leg = legByStops.get(key);
-      // Match transports whose origin→destination aligns with this gap/leg
       const matched = allTransport.filter(
         (t) => cityEq(t.origin_city, fromStop.city) && cityEq(t.destination_city, toStop.city),
       );
@@ -143,6 +163,11 @@ function buildItinerary(
     }
   }
   return items;
+}
+
+// Generate a temp ID (not cryptographic, just unique enough for local use)
+function genTempId(): string {
+  return `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -217,7 +242,6 @@ function GapRow({ item, onAddTransport, onTransportPress }: {
   const { fromCity, toCity, transport } = item;
 
   if (transport.length > 0) {
-    // Show the first (best) matched transport booking
     const t = transport[0];
     const icon = transportIcon(t.transport_type);
     const meta = [
@@ -273,6 +297,45 @@ function Connector() {
   );
 }
 
+// Editable stop card shown in edit mode (inside DraggableFlatList)
+function EditableStopCard({
+  item,
+  index,
+  onDelete,
+  drag,
+  isActive,
+}: {
+  item: EditableStop;
+  index: number;
+  onDelete: () => void;
+  drag: () => void;
+  isActive: boolean;
+}) {
+  const dateRange = formatDateRange(item.start_date, item.end_date);
+  return (
+    <View style={[styles.editStopCard, isActive && styles.editStopCardActive]}>
+      {/* Drag handle */}
+      <Pressable onLongPress={drag} style={styles.dragHandle} hitSlop={8}>
+        <Feather name="menu" size={20} color={colors.textMuted} />
+      </Pressable>
+
+      {/* Stop number + info */}
+      <View style={styles.stopCircle}>
+        <Text style={styles.stopNumber}>{index + 1}</Text>
+      </View>
+      <View style={styles.stopBody}>
+        <Text style={styles.stopCity}>{item.city}</Text>
+        {dateRange ? <Text style={styles.stopMeta}>{dateRange}</Text> : null}
+      </View>
+
+      {/* Delete button */}
+      <Pressable onPress={onDelete} style={styles.deleteBtn} hitSlop={8}>
+        <Feather name="minus-circle" size={22} color={colors.error} />
+      </Pressable>
+    </View>
+  );
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function TripDetailScreen() {
@@ -289,172 +352,506 @@ export default function TripDetailScreen() {
   const [saving, setSaving] = useState(false);
   const [activeToStopId, setActiveToStopId] = useState<string | null>(null);
 
+  // Overflow menu
+  const [menuVisible, setMenuVisible] = useState(false);
+
+  // Edit mode state
+  const [editMode, setEditMode] = useState(false);
+  const [editStops, setEditStops] = useState<EditableStop[]>([]);
+  const [deletedStopIds, setDeletedStopIds] = useState<string[]>([]);
+  const [showAddStop, setShowAddStop] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Toast
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastOpacity = useRef(new Animated.Value(0)).current;
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Fetch ─────────────────────────────────────────────────────────────────
+
+  const fetchTrip = useCallback(async () => {
+    if (!tripId) {
+      setError('No trip specified.');
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    const { data: { session } } = await supabase.auth.getSession();
+    const userId = session?.user?.id ?? null;
+
+    const { data, error: fetchError } = await supabase
+      .from('trips')
+      .select('*, stops(*), legs(*)')
+      .eq('id', tripId)
+      .single();
+
+    if (fetchError || !data) {
+      setError('Could not load this trip.');
+      setLoading(false);
+      return;
+    }
+
+    const raw = data as any;
+    const sortedStops = (raw.stops as DbStop[])
+      .slice()
+      .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+    const sortedLegs = (raw.legs as DbLeg[])
+      .slice()
+      .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+
+    setTrip({ ...raw, stops: sortedStops, legs: sortedLegs });
+    setStopOptions(sortedStops.map((s) => ({ id: s.id, city: s.city, tripName: raw.name ?? '' })));
+
+    const stopIds = sortedStops.map((s) => s.id);
+    if (stopIds.length === 0 || !userId) {
+      setItinerary(buildItinerary(sortedStops, sortedLegs, []));
+      setLoading(false);
+      return;
+    }
+
+    const inboundLegIds = sortedLegs
+      .filter((l) => l.to_stop_id && stopIds.includes(l.to_stop_id))
+      .map((l) => l.id);
+
+    const [journeyResult, savedTResult] = await Promise.all([
+      supabase
+        .from('journeys')
+        .select('id, origin_city, destination_city, leg_id')
+        .eq('trip_id', tripId!),
+      supabase
+        .from('saved_items')
+        .select('id, stop_id, note')
+        .in('stop_id', stopIds)
+        .eq('creator_id', userId)
+        .eq('category', 'Transport'),
+    ]);
+
+    const journeys = (journeyResult.data ?? []) as any[];
+    const journeyIds = journeys.map((j: any) => j.id);
+
+    const [journeyLbResult, oldLbResult] = await Promise.all([
+      journeyIds.length > 0
+        ? supabase
+            .from('leg_bookings')
+            .select('id, journey_id, leg_id, operator, reference')
+            .in('journey_id', journeyIds)
+            .eq('owner_id', userId)
+        : Promise.resolve({ data: [], error: null }),
+      inboundLegIds.length > 0
+        ? supabase
+            .from('leg_bookings')
+            .select('id, leg_id, operator, reference')
+            .in('leg_id', inboundLegIds)
+            .eq('owner_id', userId)
+            .is('journey_id', null)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+
+    const allTransport: TransportItem[] = [];
+
+    const seenJourneys = new Set<string>();
+    for (const lb of (journeyLbResult.data ?? []) as any[]) {
+      const journey = journeys.find((j: any) => j.id === lb.journey_id);
+      if (!journey) continue;
+      if (seenJourneys.has(lb.journey_id)) continue;
+      seenJourneys.add(lb.journey_id);
+      allTransport.push({
+        id: lb.id,
+        source: 'leg_bookings',
+        transport_type: 'flight',
+        operator: lb.operator ?? '',
+        service_number: lb.reference ?? '',
+        origin_city: journey.origin_city,
+        destination_city: journey.destination_city,
+        departure_date: null,
+        departure_time: null,
+      });
+    }
+
+    for (const lb of (oldLbResult.data ?? []) as any[]) {
+      const leg = sortedLegs.find((l) => l.id === lb.leg_id);
+      if (!leg || !leg.to_stop_id || !leg.from_stop_id) continue;
+      const fromStop = sortedStops.find((s) => s.id === leg.from_stop_id);
+      const toStop = sortedStops.find((s) => s.id === leg.to_stop_id);
+      if (!fromStop || !toStop) continue;
+      allTransport.push({
+        id: lb.id,
+        source: 'leg_bookings',
+        transport_type: 'flight',
+        operator: lb.operator ?? '',
+        service_number: lb.reference ?? '',
+        origin_city: fromStop.city,
+        destination_city: toStop.city,
+        departure_date: null,
+        departure_time: null,
+      });
+    }
+
+    for (const sf of savedTResult.data ?? []) {
+      try {
+        const parsed = JSON.parse((sf as any).note ?? '{}');
+        const isConnection = parsed.is_connection === true && Array.isArray(parsed.legs) && parsed.legs.length > 0;
+        const firstLeg = isConnection ? parsed.legs[0] : parsed;
+        const lastLeg  = isConnection ? parsed.legs[parsed.legs.length - 1] : parsed;
+        const originCity: string = firstLeg?.origin_city ?? '';
+        const destinationCity: string = lastLeg?.destination_city ?? '';
+        if (!originCity || !destinationCity) continue;
+        allTransport.push({
+          id: (sf as any).id,
+          source: 'saved_items',
+          transport_type: firstLeg?.transport_type ?? 'flight',
+          operator: firstLeg?.operator ?? firstLeg?.airline ?? '',
+          service_number: firstLeg?.service_number ?? firstLeg?.flight_number ?? '',
+          origin_city: originCity,
+          destination_city: destinationCity,
+          departure_date: firstLeg?.departure_date ?? null,
+          departure_time: firstLeg?.departure_time ?? null,
+        });
+      } catch { /* skip malformed */ }
+    }
+
+    setItinerary(buildItinerary(sortedStops, sortedLegs, allTransport));
+    setLoading(false);
+  }, [tripId]);
+
   useFocusEffect(
     useCallback(() => {
-      const fetchTrip = async () => {
-        if (!tripId) {
-          setError('No trip specified.');
-          setLoading(false);
-          return;
-        }
+      fetchTrip();
+    }, [fetchTrip])
+  );
 
-        const { data: { session } } = await supabase.auth.getSession();
-        const userId = session?.user?.id ?? null;
+  // ── Toast ─────────────────────────────────────────────────────────────────
 
-        const { data, error: fetchError } = await supabase
-          .from('trips')
-          .select('*, stops(*), legs(*)')
-          .eq('id', tripId)
+  function showToast(message: string) {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToastMsg(message);
+    toastOpacity.setValue(0);
+    Animated.timing(toastOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+    toastTimer.current = setTimeout(() => {
+      Animated.timing(toastOpacity, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => {
+        setToastMsg(null);
+      });
+    }, 4500);
+  }
+
+  // ── Edit mode ─────────────────────────────────────────────────────────────
+
+  function enterEditMode() {
+    if (!trip) return;
+    setEditStops(
+      trip.stops.map((s) => ({
+        tempId: s.id,
+        dbId: s.id,
+        city: s.city,
+        country: s.country,
+        start_date: s.start_date,
+        end_date: s.end_date,
+        latitude: null,
+        longitude: null,
+      }))
+    );
+    setDeletedStopIds([]);
+    setEditMode(true);
+  }
+
+  function exitEditMode() {
+    setEditMode(false);
+    setEditStops([]);
+    setDeletedStopIds([]);
+  }
+
+  function hasUnsavedChanges(): boolean {
+    if (!trip) return false;
+    if (deletedStopIds.length > 0) return true;
+    if (editStops.some(s => s.dbId === null)) return true;
+    // Check reorder: compare tempIds (which equal dbIds for existing stops) against original order
+    for (let i = 0; i < editStops.length; i++) {
+      if (editStops[i].dbId !== trip.stops[i]?.id) return true;
+    }
+    return false;
+  }
+
+  function handleCancel() {
+    if (!hasUnsavedChanges()) {
+      exitEditMode();
+      return;
+    }
+    Alert.alert(
+      'Discard changes?',
+      "Your edits to stops haven't been saved.",
+      [
+        { text: 'Keep Editing', style: 'cancel' },
+        { text: 'Discard', style: 'destructive', onPress: exitEditMode },
+      ]
+    );
+  }
+
+  // ── Add stop ──────────────────────────────────────────────────────────────
+
+  function handleAddStop(pending: PendingStop) {
+    setEditStops(prev => [
+      ...prev,
+      {
+        tempId: genTempId(),
+        dbId: null,
+        city: pending.city,
+        country: pending.country,
+        start_date: pending.start_date,
+        end_date: pending.end_date,
+        latitude: pending.latitude,
+        longitude: pending.longitude,
+      },
+    ]);
+    setShowAddStop(false);
+  }
+
+  // ── Delete stop ───────────────────────────────────────────────────────────
+
+  async function handleDeleteStop(stop: EditableStop) {
+    // New stop not yet in DB — remove directly
+    if (stop.dbId === null) {
+      Alert.alert(
+        `Remove ${stop.city}?`,
+        'This stop will be removed from your trip.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => removeStopFromList(stop.tempId, null),
+          },
+        ]
+      );
+      return;
+    }
+
+    // Existing stop — fetch bookings that would be lost
+    const [accomResult, eventsResult] = await Promise.all([
+      supabase.from('accommodation').select('name').eq('stop_id', stop.dbId),
+      supabase.from('events').select('title').eq('stop_id', stop.dbId).limit(10),
+    ]);
+
+    const lostItems: string[] = [
+      ...(accomResult.data ?? []).map((a: any) => a.name ?? 'Accommodation'),
+      ...(eventsResult.data ?? []).map((e: any) => e.title),
+    ];
+
+    if (lostItems.length === 0) {
+      Alert.alert(
+        `Remove ${stop.city}?`,
+        'Remove this stop from your trip?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => removeStopFromList(stop.tempId, stop.dbId),
+          },
+        ]
+      );
+    } else {
+      const preview = lostItems.slice(0, 5).join('\n');
+      const extra = lostItems.length > 5 ? `\n…and ${lostItems.length - 5} more` : '';
+      Alert.alert(
+        `Remove ${stop.city}?`,
+        `This will also delete:\n${preview}${extra}`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => removeStopFromList(stop.tempId, stop.dbId),
+          },
+        ]
+      );
+    }
+  }
+
+  function removeStopFromList(tempId: string, dbId: string | null) {
+    setEditStops(prev => prev.filter(s => s.tempId !== tempId));
+    if (dbId) setDeletedStopIds(prev => [...prev, dbId]);
+  }
+
+  // ── Save changes ──────────────────────────────────────────────────────────
+
+  async function handleDone() {
+    if (!trip || editSaving) return;
+    setEditSaving(true);
+
+    try {
+      // 1. Insert new stops
+      const insertedIds = new Map<string, string>(); // tempId → real dbId
+      const newStops = editStops.filter(s => s.dbId === null);
+
+      for (const s of newStops) {
+        const { data, error: insertErr } = await supabase
+          .from('stops')
+          .insert({
+            trip_id: trip.id,
+            city: s.city,
+            country: s.country,
+            latitude: s.latitude,
+            longitude: s.longitude,
+            start_date: s.start_date,
+            end_date: s.end_date,
+            order_index: 9999,
+          })
+          .select('id')
           .single();
 
-        if (fetchError || !data) {
-          setError('Could not load this trip.');
-          setLoading(false);
-          return;
+        if (insertErr || !data) throw new Error(`Failed to add ${s.city}.`);
+        insertedIds.set(s.tempId, data.id);
+      }
+
+      // 2. Build final stops with resolved IDs (for leg recalculation)
+      const finalStops = editStops.map(s => ({
+        ...s,
+        resolvedId: s.dbId ?? insertedIds.get(s.tempId) ?? null,
+      }));
+
+      // 3. Delete legs that reference any stop being deleted
+      //    (prevents FK violation when we delete the stops)
+      if (deletedStopIds.length > 0) {
+        const { data: orphanLegs } = await supabase
+          .from('legs')
+          .select('id')
+          .eq('trip_id', trip.id)
+          .or(
+            deletedStopIds.map(id => `from_stop_id.eq.${id},to_stop_id.eq.${id}`).join(',')
+          );
+
+        if (orphanLegs && orphanLegs.length > 0) {
+          await supabase.from('legs').delete().in('id', orphanLegs.map(l => l.id));
         }
 
-        const raw = data as any;
-        const sortedStops = (raw.stops as DbStop[])
-          .slice()
-          .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
-        const sortedLegs = (raw.legs as DbLeg[])
-          .slice()
-          .sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+        // 4. Delete the stops (cascades to accommodation, days, events, saved_items)
+        await supabase.from('stops').delete().in('id', deletedStopIds);
+      }
 
-        setTrip({ ...raw, stops: sortedStops, legs: sortedLegs });
-        setStopOptions(sortedStops.map((s) => ({ id: s.id, city: s.city, tripName: raw.name ?? '' })));
+      // 5. Update order_index for all remaining stops
+      const remainingStops = finalStops.filter(s => s.resolvedId !== null);
+      for (let i = 0; i < remainingStops.length; i++) {
+        await supabase
+          .from('stops')
+          .update({ order_index: i })
+          .eq('id', remainingStops[i].resolvedId!);
+      }
 
-        const stopIds = sortedStops.map((s) => s.id);
-        if (stopIds.length === 0 || !userId) {
-          setItinerary(buildItinerary(sortedStops, sortedLegs, []));
-          setLoading(false);
-          return;
+      // 6. Recalculate legs for new stop sequence
+      const validStops = remainingStops.filter(s => s.resolvedId) as Array<{ resolvedId: string; city: string }>;
+      const legChanges = await recalculateLegs(trip.id, validStops);
+
+      // 7. Show toast about leg changes
+      if (legChanges.added.length > 0 || legChanges.removed.length > 0) {
+        const parts: string[] = [];
+        if (legChanges.added.length > 0) {
+          parts.push(`Added: ${legChanges.added.join(', ')}`);
         }
-
-        // Leg IDs whose destination is one of this trip's stops (needed for
-        // backward-compat fetch of old leg_bookings without journey_id).
-        const inboundLegIds = sortedLegs
-          .filter((l) => l.to_stop_id && stopIds.includes(l.to_stop_id))
-          .map((l) => l.id);
-
-        // Step 1: fetch journeys for this trip + saved_items transport
-        const [journeyResult, savedTResult] = await Promise.all([
-          supabase
-            .from('journeys')
-            .select('id, origin_city, destination_city, leg_id')
-            .eq('trip_id', tripId!),
-          supabase
-            .from('saved_items')
-            .select('id, stop_id, note')
-            .in('stop_id', stopIds)
-            .eq('creator_id', userId)
-            .eq('category', 'Transport'),
-        ]);
-
-        const journeys = (journeyResult.data ?? []) as any[];
-        const journeyIds = journeys.map((j: any) => j.id);
-
-        // Step 2: fetch leg_bookings — new records (via journey_id) and old
-        // records without journey_id (backward compat)
-        const [journeyLbResult, oldLbResult] = await Promise.all([
-          journeyIds.length > 0
-            ? supabase
-                .from('leg_bookings')
-                .select('id, journey_id, leg_id, operator, reference')
-                .in('journey_id', journeyIds)
-                .eq('owner_id', userId)
-            : Promise.resolve({ data: [], error: null }),
-          inboundLegIds.length > 0
-            ? supabase
-                .from('leg_bookings')
-                .select('id, leg_id, operator, reference')
-                .in('leg_id', inboundLegIds)
-                .eq('owner_id', userId)
-                .is('journey_id', null)
-            : Promise.resolve({ data: [], error: null }),
-        ]);
-
-        // Build flat transport list for city-based gap matching
-        const allTransport: TransportItem[] = [];
-
-        // Journey-backed leg_bookings: use the journey's stored cities.
-        // Deduplicate by journey_id — connections create N leg_bookings per journey
-        // but we only want one transport item per journey.
-        const seenJourneys = new Set<string>();
-        for (const lb of (journeyLbResult.data ?? []) as any[]) {
-          const journey = journeys.find((j: any) => j.id === lb.journey_id);
-          if (!journey) continue;
-          if (seenJourneys.has(lb.journey_id)) continue;
-          seenJourneys.add(lb.journey_id);
-          allTransport.push({
-            id: lb.id,
-            source: 'leg_bookings',
-            transport_type: 'flight',
-            operator: lb.operator ?? '',
-            service_number: lb.reference ?? '',
-            origin_city: journey.origin_city,
-            destination_city: journey.destination_city,
-            departure_date: null,
-            departure_time: null,
-          });
+        if (legChanges.removed.length > 0) {
+          parts.push(`Removed: ${legChanges.removed.join(', ')}`);
         }
+        showToast(`Legs updated — ${parts.join('. ')}`);
+      }
 
-        // Old leg_bookings (no journey_id) — derive cities from stop records
-        for (const lb of (oldLbResult.data ?? []) as any[]) {
-          const leg = sortedLegs.find((l) => l.id === lb.leg_id);
-          if (!leg || !leg.to_stop_id || !leg.from_stop_id) continue;
-          const fromStop = sortedStops.find((s) => s.id === leg.from_stop_id);
-          const toStop = sortedStops.find((s) => s.id === leg.to_stop_id);
-          if (!fromStop || !toStop) continue;
-          allTransport.push({
-            id: lb.id,
-            source: 'leg_bookings',
-            transport_type: 'flight',
-            operator: lb.operator ?? '',
-            service_number: lb.reference ?? '',
-            origin_city: fromStop.city,
-            destination_city: toStop.city,
-            departure_date: null,
-            departure_time: null,
-          });
-        }
+      // 8. Refresh data and exit edit mode
+      exitEditMode();
+      await fetchTrip();
+    } catch (err: any) {
+      Alert.alert('Could not save', err?.message ?? 'Please try again.');
+    } finally {
+      setEditSaving(false);
+    }
+  }
 
-        for (const sf of savedTResult.data ?? []) {
-          try {
-            const parsed = JSON.parse((sf as any).note ?? '{}');
+  // ── Leg recalculation ─────────────────────────────────────────────────────
 
-            // Connection bookings store legs in a nested array
-            const isConnection = parsed.is_connection === true && Array.isArray(parsed.legs) && parsed.legs.length > 0;
-            const firstLeg = isConnection ? parsed.legs[0] : parsed;
-            const lastLeg  = isConnection ? parsed.legs[parsed.legs.length - 1] : parsed;
+  async function recalculateLegs(
+    tripId: string,
+    orderedStops: Array<{ resolvedId: string; city: string }>,
+  ): Promise<{ added: string[]; removed: string[] }> {
+    // Fetch current legs
+    const { data: currentLegs } = await supabase
+      .from('legs')
+      .select('id, from_stop_id, to_stop_id')
+      .eq('trip_id', tripId);
 
-            const originCity: string = firstLeg?.origin_city ?? '';
-            const destinationCity: string = lastLeg?.destination_city ?? '';
-            if (!originCity || !destinationCity) continue;
+    const legs = (currentLegs ?? []) as Array<{ id: string; from_stop_id: string | null; to_stop_id: string | null }>;
 
-            allTransport.push({
-              id: (sf as any).id,
-              source: 'saved_items',
-              transport_type: firstLeg?.transport_type ?? 'flight',
-              operator: firstLeg?.operator ?? firstLeg?.airline ?? '',
-              service_number: firstLeg?.service_number ?? firstLeg?.flight_number ?? '',
-              origin_city: originCity,
-              destination_city: destinationCity,
-              departure_date: firstLeg?.departure_date ?? null,
-              departure_time: firstLeg?.departure_time ?? null,
-            });
-          } catch { /* skip malformed */ }
-        }
+    // Expected consecutive pairs from new stop order
+    const expectedPairs = new Map<string, { fromCity: string; toCity: string; orderIdx: number }>();
+    for (let i = 0; i < orderedStops.length - 1; i++) {
+      const key = `${orderedStops[i].resolvedId}:${orderedStops[i + 1].resolvedId}`;
+      expectedPairs.set(key, {
+        fromCity: orderedStops[i].city,
+        toCity: orderedStops[i + 1].city,
+        orderIdx: i,
+      });
+    }
 
-        setItinerary(buildItinerary(sortedStops, sortedLegs, allTransport));
-        setLoading(false);
-      };
+    const existingPairKeys = new Set(
+      legs
+        .filter(l => l.from_stop_id && l.to_stop_id)
+        .map(l => `${l.from_stop_id}:${l.to_stop_id}`)
+    );
 
-      setLoading(true);
-      setError(null);
-      fetchTrip();
-    }, [tripId])
-  );
+    // Legs to delete: existing but not expected
+    const toDelete = legs.filter(
+      l => l.from_stop_id && l.to_stop_id && !expectedPairs.has(`${l.from_stop_id}:${l.to_stop_id}`)
+    );
+
+    // Pairs to insert: expected but not existing
+    const toInsert = Array.from(expectedPairs.entries()).filter(
+      ([key]) => !existingPairKeys.has(key)
+    );
+
+    // Execute deletions
+    if (toDelete.length > 0) {
+      await supabase.from('legs').delete().in('id', toDelete.map(l => l.id));
+    }
+
+    // Execute insertions
+    if (toInsert.length > 0) {
+      await supabase.from('legs').insert(
+        toInsert.map(([key, val]) => {
+          const [fromId, toId] = key.split(':');
+          return {
+            trip_id: tripId,
+            from_stop_id: fromId,
+            to_stop_id: toId,
+            order_index: val.orderIdx,
+          };
+        })
+      );
+    }
+
+    // Update order_index for preserved legs
+    const existingLegsMap = new Map(
+      legs
+        .filter(l => l.from_stop_id && l.to_stop_id)
+        .map(l => [`${l.from_stop_id}:${l.to_stop_id}`, l])
+    );
+    for (const [key, val] of expectedPairs) {
+      const leg = existingLegsMap.get(key);
+      if (leg) {
+        await supabase.from('legs').update({ order_index: val.orderIdx }).eq('id', leg.id);
+      }
+    }
+
+    // Build human-readable change summaries
+    const removedLegs = toDelete.map(l => {
+      const fromStop = orderedStops.find(s => s.resolvedId === l.from_stop_id);
+      const toStop = orderedStops.find(s => s.resolvedId === l.to_stop_id);
+      // If stop was deleted its city won't be in orderedStops — fall back to IDs
+      return `${fromStop?.city ?? '?'} → ${toStop?.city ?? '?'}`;
+    });
+
+    const addedLegs = toInsert.map(([, val]) => `${val.fromCity} → ${val.toCity}`);
+
+    return { added: addedLegs, removed: removedLegs };
+  }
 
   // ── Add transport (manual) ────────────────────────────────────────────────
 
@@ -468,7 +865,6 @@ export default function TripDetailScreen() {
 
       const targetStopId = stopId ?? activeToStopId;
 
-      // Try to match a leg by destination city first
       const { data: legs } = await supabase
         .from('legs')
         .select('id, from_stop:from_stop_id(city), to_stop:to_stop_id(city)')
@@ -560,15 +956,51 @@ export default function TripDetailScreen() {
   const meta = [tripDateRange, nights > 0 ? `${nights} nights` : ''].filter(Boolean).join(' · ');
 
   return (
-    <View style={styles.container}>
+    <GestureHandlerRootView style={styles.container}>
       <StatusBar style="dark" />
+
+      {/* ── Header ── */}
       <SafeAreaView edges={['top']} style={styles.safeTop}>
         <View style={styles.navRow}>
-          <Pressable style={styles.backButton} onPress={() => router.back()} hitSlop={8}>
-            <Feather name="arrow-left" size={22} color={colors.text} />
-          </Pressable>
+          {editMode ? (
+            // Cancel button replaces back arrow in edit mode
+            <Pressable style={styles.navTextButton} onPress={handleCancel} hitSlop={8}>
+              <Text style={styles.navCancelText}>Cancel</Text>
+            </Pressable>
+          ) : (
+            <Pressable style={styles.backButton} onPress={() => router.back()} hitSlop={8}>
+              <Feather name="arrow-left" size={22} color={colors.text} />
+            </Pressable>
+          )}
+
           <View style={styles.navSpacer} />
+
+          {editMode ? (
+            // Done button
+            <Pressable
+              style={styles.navTextButton}
+              onPress={handleDone}
+              disabled={editSaving}
+              hitSlop={8}
+            >
+              {editSaving ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : (
+                <Text style={styles.navDoneText}>Done</Text>
+              )}
+            </Pressable>
+          ) : (
+            // Three-dot overflow menu trigger
+            <Pressable
+              style={styles.overflowButton}
+              onPress={() => setMenuVisible(true)}
+              hitSlop={8}
+            >
+              <Feather name="more-horizontal" size={22} color={colors.text} />
+            </Pressable>
+          )}
         </View>
+
         <View style={styles.tripMeta}>
           <View style={styles.typeBadge}>
             <Text style={styles.typeBadgeLabel}>
@@ -580,64 +1012,135 @@ export default function TripDetailScreen() {
         </View>
       </SafeAreaView>
 
-      <ScrollView
-        style={styles.flex1}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
-        {itinerary.length === 0 ? (
-          <View style={styles.emptyWrap}>
-            <Feather name="map-pin" size={24} color={colors.border} />
-            <Text style={styles.emptyText}>No stops added yet</Text>
-          </View>
-        ) : (
-          itinerary.map((item, index) => (
-            <React.Fragment key={index}>
-              {index > 0 && <Connector />}
-              {item.kind === 'stop' && (
-                <StopRow
-                  item={item}
-                  onPress={() =>
-                    router.push({ pathname: '/stop-detail', params: { stopId: item.stop.id } })
-                  }
-                />
-              )}
-              {item.kind === 'leg' && (
-                <LegRow
-                  item={item}
-                  onPress={() => {
-                    const t = item.transport[0];
-                    if (t) {
+      {/* ── Normal view ── */}
+      {!editMode && (
+        <ScrollView
+          style={styles.flex1}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {itinerary.length === 0 ? (
+            <View style={styles.emptyWrap}>
+              <Feather name="map-pin" size={24} color={colors.border} />
+              <Text style={styles.emptyText}>No stops added yet</Text>
+            </View>
+          ) : (
+            itinerary.map((item, index) => (
+              <React.Fragment key={index}>
+                {index > 0 && <Connector />}
+                {item.kind === 'stop' && (
+                  <StopRow
+                    item={item}
+                    onPress={() =>
+                      router.push({ pathname: '/stop-detail', params: { stopId: item.stop.id } })
+                    }
+                  />
+                )}
+                {item.kind === 'leg' && (
+                  <LegRow
+                    item={item}
+                    onPress={() => {
+                      const t = item.transport[0];
+                      if (t) {
+                        router.push({
+                          pathname: '/booking-detail',
+                          params: { type: 'transport', id: t.id, source: t.source },
+                        });
+                      } else {
+                        router.push({ pathname: '/leg', params: { legId: item.leg.id } });
+                      }
+                    }}
+                  />
+                )}
+                {item.kind === 'gap' && (
+                  <GapRow
+                    item={item}
+                    onAddTransport={() => {
+                      setActiveToStopId(item.toStopId);
+                      setManualVisible(true);
+                    }}
+                    onTransportPress={(t) =>
                       router.push({
                         pathname: '/booking-detail',
                         params: { type: 'transport', id: t.id, source: t.source },
-                      });
-                    } else {
-                      router.push({ pathname: '/leg', params: { legId: item.leg.id } });
+                      })
                     }
-                  }}
-                />
-              )}
-              {item.kind === 'gap' && (
-                <GapRow
-                  item={item}
-                  onAddTransport={() => {
-                    setActiveToStopId(item.toStopId);
-                    setManualVisible(true);
-                  }}
-                  onTransportPress={(t) =>
-                    router.push({
-                      pathname: '/booking-detail',
-                      params: { type: 'transport', id: t.id, source: t.source },
-                    })
-                  }
-                />
-              )}
-            </React.Fragment>
-          ))
-        )}
-      </ScrollView>
+                  />
+                )}
+              </React.Fragment>
+            ))
+          )}
+        </ScrollView>
+      )}
 
+      {/* ── Edit mode view ── */}
+      {editMode && (
+        <DraggableFlatList
+          data={editStops}
+          keyExtractor={(item) => item.tempId}
+          onDragEnd={({ data }) => setEditStops(data)}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          renderItem={({ item, drag, isActive, getIndex }: RenderItemParams<EditableStop>) => (
+            <ScaleDecorator activeScale={1.03}>
+              <EditableStopCard
+                item={item}
+                index={getIndex() ?? 0}
+                drag={drag}
+                isActive={isActive}
+                onDelete={() => handleDeleteStop(item)}
+              />
+            </ScaleDecorator>
+          )}
+          ListEmptyComponent={
+            <View style={styles.emptyWrap}>
+              <Feather name="map-pin" size={24} color={colors.border} />
+              <Text style={styles.emptyText}>No stops — add one below</Text>
+            </View>
+          }
+          ListFooterComponent={
+            <Pressable
+              style={styles.addStopBtn}
+              onPress={() => setShowAddStop(true)}
+            >
+              <Feather name="plus" size={16} color={colors.primary} />
+              <Text style={styles.addStopText}>Add Stop</Text>
+            </Pressable>
+          }
+        />
+      )}
+
+      {/* ── Overflow menu modal ── */}
+      <Modal
+        visible={menuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenuVisible(false)}
+      >
+        <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
+          <View style={styles.menuPopup}>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuVisible(false);
+                enterEditMode();
+              }}
+            >
+              <Feather name="edit-2" size={15} color={colors.text} style={styles.menuIcon} />
+              <Text style={styles.menuItemText}>Edit Stops</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
+      {/* ── Add stop sheet ── */}
+      <AddStopSheet
+        visible={showAddStop}
+        onAdd={handleAddStop}
+        onClose={() => setShowAddStop(false)}
+      />
+
+      {/* ── Manual transport sheet ── */}
       <ManualTransportSheet
         visible={manualVisible}
         stops={stopOptions}
@@ -645,7 +1148,14 @@ export default function TripDetailScreen() {
         onSave={handleSaveManualTransport}
         onDiscard={() => { setManualVisible(false); setActiveToStopId(null); }}
       />
-    </View>
+
+      {/* ── Toast ── */}
+      {toastMsg ? (
+        <Animated.View style={[styles.toast, { opacity: toastOpacity }]}>
+          <Text style={styles.toastText} numberOfLines={3}>{toastMsg}</Text>
+        </Animated.View>
+      ) : null}
+    </GestureHandlerRootView>
   );
 }
 
@@ -665,6 +1175,10 @@ const styles = StyleSheet.create({
   },
   backButton: { width: 36, alignItems: 'flex-start' },
   navSpacer: { flex: 1 },
+  overflowButton: { width: 36, alignItems: 'flex-end' },
+  navTextButton: { paddingHorizontal: 4, paddingVertical: 2 },
+  navCancelText: { fontFamily: fonts.body, fontSize: 16, color: colors.textMuted },
+  navDoneText: { fontFamily: fonts.bodyBold, fontSize: 16, color: colors.primary },
 
   tripMeta: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 18 },
   typeBadge: {
@@ -687,7 +1201,7 @@ const styles = StyleSheet.create({
   connector: { alignItems: 'center', height: 20 },
   connectorLine: { width: 2, flex: 1, backgroundColor: colors.border },
 
-  // Stop row
+  // Stop row (normal mode)
   stopRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.white, borderRadius: 14, padding: 14,
@@ -706,7 +1220,7 @@ const styles = StyleSheet.create({
   stopCity: { fontFamily: fonts.bodyBold, fontSize: 17, color: colors.text, marginBottom: 2 },
   stopMeta: { fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
 
-  // Leg row (existing leg record)
+  // Leg row
   legRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     backgroundColor: colors.background,
@@ -721,7 +1235,7 @@ const styles = StyleSheet.create({
   legRoute: { flex: 1, fontFamily: fonts.bodyBold, fontSize: 13, color: colors.text },
   legType: { fontFamily: fonts.body, fontSize: 12, color: colors.textMuted, flexShrink: 0 },
 
-  // Gap row — empty state
+  // Gap row
   gapRow: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     borderRadius: 10, borderWidth: 1, borderColor: colors.border,
@@ -734,8 +1248,6 @@ const styles = StyleSheet.create({
   },
   gapText: { flex: 1, fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
   gapAction: { fontFamily: fonts.bodyBold, fontSize: 12, color: colors.primary, flexShrink: 0 },
-
-  // Gap row — filled with transport
   gapRowFilled: {
     backgroundColor: colors.white,
     borderColor: colors.border,
@@ -751,9 +1263,42 @@ const styles = StyleSheet.create({
   gapTransportRoute: { fontFamily: fonts.bodyBold, fontSize: 13, color: colors.text, marginBottom: 2 },
   gapTransportMeta: { fontFamily: fonts.body, fontSize: 12, color: colors.textMuted },
 
+  // Edit mode stop card
+  editStopCard: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: colors.white, borderRadius: 14, padding: 12,
+    marginBottom: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05, shadowRadius: 6, elevation: 2,
+  },
+  editStopCardActive: {
+    shadowOpacity: 0.15, shadowRadius: 12, elevation: 8,
+  },
+  dragHandle: {
+    paddingHorizontal: 4, paddingVertical: 8, marginRight: 8,
+  },
+  deleteBtn: { paddingLeft: 8 },
+
+  // Add stop button
+  addStopBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8,
+    marginTop: 4,
+    paddingVertical: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: colors.primary,
+    borderStyle: 'dashed',
+  },
+  addStopText: {
+    fontFamily: fonts.bodyBold, fontSize: 15, color: colors.primary,
+  },
+
+  // Empty state
   emptyWrap: { alignItems: 'center', paddingVertical: 48, gap: 12 },
   emptyText: { fontFamily: fonts.body, fontSize: 14, color: colors.textMuted },
 
+  // Error / loading
   centred: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
   errorText: {
     fontFamily: fonts.body, fontSize: 14,
@@ -764,4 +1309,51 @@ const styles = StyleSheet.create({
     borderRadius: 10, borderWidth: 1, borderColor: colors.border,
   },
   retryText: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.primary },
+
+  // Overflow menu
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    justifyContent: 'flex-start',
+    alignItems: 'flex-end',
+    paddingTop: 100,
+    paddingRight: 16,
+  },
+  menuPopup: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    paddingVertical: 4,
+    minWidth: 160,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  menuItem: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: 16, paddingVertical: 13,
+  },
+  menuIcon: { marginRight: 10 },
+  menuItemText: {
+    fontFamily: fonts.body, fontSize: 15, color: colors.text,
+  },
+
+  // Toast
+  toast: {
+    position: 'absolute',
+    bottom: 36,
+    left: 16,
+    right: 16,
+    backgroundColor: colors.text,
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  toastText: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    color: colors.white,
+    lineHeight: 20,
+  },
 });

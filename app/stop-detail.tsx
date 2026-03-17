@@ -997,11 +997,10 @@ function SavedTab({
   tripId: string;
   onPlaceAdded: (place: SavedPlace) => void;
 }) {
+  const router = useRouter();
   const [activeFilter, setActiveFilter] = useState<string>('All');
   const [addSheetVisible, setAddSheetVisible] = useState(false);
   const [localPlaces, setLocalPlaces] = useState<SavedPlace[]>(places);
-  const [selectedPlace, setSelectedPlace] = useState<SavedPlace | null>(null);
-  const [detailVisible, setDetailVisible] = useState(false);
 
   // Sync when parent reloads
   useEffect(() => { setLocalPlaces(places); }, [places]);
@@ -1009,11 +1008,6 @@ function SavedTab({
   const filtered = activeFilter === 'All'
     ? localPlaces
     : localPlaces.filter((p) => p.category === activeFilter);
-
-  function handlePlacePress(place: SavedPlace) {
-    setSelectedPlace(place);
-    setDetailVisible(true);
-  }
 
   return (
     <View style={styles.flex1}>
@@ -1058,7 +1052,11 @@ function SavedTab({
           </View>
         ) : (
           filtered.map((place) => (
-            <PlaceRow key={place.id} place={place} onPress={() => handlePlacePress(place)} />
+            <PlaceRow
+              key={place.id}
+              place={place}
+              onPress={() => router.push({ pathname: '/place-detail', params: { placeId: place.id } })}
+            />
           ))
         )}
 
@@ -1080,26 +1078,6 @@ function SavedTab({
         onClose={() => setAddSheetVisible(false)}
       />
 
-      <PlaceDetailSheet
-        visible={detailVisible}
-        place={selectedPlace}
-        canMoveToInbox
-        onClose={() => setDetailVisible(false)}
-        onUpdated={(updated) => {
-          setLocalPlaces((prev) =>
-            prev.map((p) => (p.id === updated.id ? updated : p)),
-          );
-          setDetailVisible(false);
-        }}
-        onDeleted={(placeId) => {
-          setLocalPlaces((prev) => prev.filter((p) => p.id !== placeId));
-          setDetailVisible(false);
-        }}
-        onMoved={(placeId) => {
-          setLocalPlaces((prev) => prev.filter((p) => p.id !== placeId));
-          setDetailVisible(false);
-        }}
-      />
     </View>
   );
 }
@@ -1439,6 +1417,25 @@ export default function StopDetailScreen() {
 
   async function confirmDeleteStop() {
     if (!stop) return;
+
+    // Delete legs that reference this stop before deleting the stop itself,
+    // otherwise the FK constraint (stops ← legs) raises a violation.
+    const { data: referencingLegs } = await supabase
+      .from('legs')
+      .select('id')
+      .or(`from_stop_id.eq.${stop.id},to_stop_id.eq.${stop.id}`);
+
+    if (referencingLegs && referencingLegs.length > 0) {
+      const { error: legsErr } = await supabase
+        .from('legs')
+        .delete()
+        .in('id', referencingLegs.map((l: any) => l.id));
+      if (legsErr) {
+        Alert.alert('Could not delete stop', legsErr.message);
+        return;
+      }
+    }
+
     const { error: deleteErr } = await supabase.from('stops').delete().eq('id', stop.id);
     if (deleteErr) {
       Alert.alert('Could not delete stop', deleteErr.message);

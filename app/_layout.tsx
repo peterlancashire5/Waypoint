@@ -82,6 +82,7 @@ export default function RootLayout() {
       <Stack.Screen name="trip-detail" options={{ headerShown: false }} />
       <Stack.Screen name="settings" options={{ headerShown: false }} />
       <Stack.Screen name="booking-detail" options={{ headerShown: false }} />
+      <Stack.Screen name="place-detail" options={{ headerShown: false }} />
     </Stack>
   );
 }
