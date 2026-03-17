@@ -35,6 +35,13 @@ interface AccommodationRecord {
   wifi_name: string | null;
   wifi_password: string | null;
   door_code: string | null;
+  // Provider type + type-specific fields
+  accommodation_type: 'airbnb' | 'booking_com' | 'hotels_com' | 'hostel' | 'hotel' | null;
+  host_name: string | null;
+  access_code: string | null;
+  checkin_instructions: string | null;
+  room_type: string | null;
+  checkin_hours: string | null;
 }
 
 // Journey-backed leg_booking
@@ -255,6 +262,16 @@ function SectionHeading({ label }: { label: string }) {
 
 // ─── Accommodation detail ─────────────────────────────────────────────────────
 
+function accommodationProviderLabel(type: AccommodationRecord['accommodation_type']): string {
+  switch (type) {
+    case 'airbnb':      return 'Airbnb';
+    case 'booking_com': return 'Booking.com';
+    case 'hotels_com':  return 'Hotels.com';
+    case 'hostel':      return 'Hostelworld';
+    default:            return 'Hotel';
+  }
+}
+
 function AccommodationDetail({
   record,
   onFieldSave,
@@ -266,6 +283,57 @@ function AccommodationDetail({
   const endDate = record.check_out_date;
   const nights = computeNights(startDate, endDate, null);
   const dateRange = (startDate || endDate) ? formatDateRange(startDate, endDate) : null;
+  const providerLabel = accommodationProviderLabel(record.accommodation_type);
+  const isAirbnb = record.accommodation_type === 'airbnb';
+  const isHostel = record.accommodation_type === 'hostel';
+
+  // Airbnb check-in rows — only include fields that have data
+  const airbnbCheckinItems: React.ReactNode[] = [];
+  if (record.host_name) {
+    airbnbCheckinItems.push(
+      <EditableRow key="host" label="Host" value={record.host_name}
+        onSave={(v) => onFieldSave('host_name', v)} />
+    );
+  }
+  if (record.access_code) {
+    airbnbCheckinItems.push(
+      <View key="access" style={styles.accessCodeRow}>
+        <View style={styles.accessCodeLeft}>
+          <Feather name="key" size={14} color={colors.accent} />
+          <Text style={styles.accessCodeLabel}>Access code</Text>
+        </View>
+        <Text style={styles.accessCodeValue}>{record.access_code}</Text>
+      </View>
+    );
+  }
+  if (record.checkin_instructions) {
+    airbnbCheckinItems.push(
+      <EditableRow key="instructions" label="Check-in instructions"
+        value={record.checkin_instructions}
+        onSave={(v) => onFieldSave('checkin_instructions', v)} />
+    );
+  }
+
+  // Hostel room rows — only include fields that have data
+  const hostelRoomItems: React.ReactNode[] = [];
+  if (record.room_type) {
+    hostelRoomItems.push(
+      <EditableRow key="room" label="Room type" value={record.room_type}
+        onSave={(v) => onFieldSave('room_type', v)} />
+    );
+  }
+  if (record.checkin_hours) {
+    hostelRoomItems.push(
+      <EditableRow key="hours" label="Check-in hours" value={record.checkin_hours}
+        onSave={(v) => onFieldSave('checkin_hours', v)} />
+    );
+  }
+
+  // Access rows — only include fields that have data
+  const accessItems: Array<{ key: 'wifi_name' | 'wifi_password' | 'door_code'; label: string; value: string }> = [];
+  if (record.wifi_name)     accessItems.push({ key: 'wifi_name',     label: 'Wi-Fi name',     value: record.wifi_name });
+  if (record.wifi_password) accessItems.push({ key: 'wifi_password', label: 'Wi-Fi password', value: record.wifi_password });
+  if (record.door_code)     accessItems.push({ key: 'door_code',     label: 'Door code',      value: record.door_code });
 
   return (
     <>
@@ -276,6 +344,9 @@ function AccommodationDetail({
         </View>
         <View style={styles.heroText}>
           <Text style={styles.heroTitle}>{record.name || 'Accommodation'}</Text>
+          <View style={styles.heroTypeBadge}>
+            <Text style={styles.heroTypeBadgeText}>{providerLabel}</Text>
+          </View>
           {(dateRange || nights !== null) ? (
             <Text style={styles.heroSubtitle}>
               {[dateRange, nights !== null ? `${nights} ${nights === 1 ? 'night' : 'nights'}` : null]
@@ -291,75 +362,99 @@ function AccommodationDetail({
       {/* Stay details */}
       <SectionHeading label="Stay details" />
       <View style={styles.card}>
-        <EditableRow
-          label="Property name"
-          value={record.name}
-          placeholder="Hotel or property name"
-          onSave={(v) => onFieldSave('name', v)}
-        />
+        <EditableRow label="Property name" value={record.name}
+          placeholder="Hotel or property name" onSave={(v) => onFieldSave('name', v)} />
+        {dateRange ? <>
+          <View style={styles.divider} />
+          <ReadOnlyRow label="Dates"
+            value={`${dateRange}${nights !== null ? ` · ${nights} ${nights === 1 ? 'night' : 'nights'}` : ''}`} />
+        </> : null}
         <View style={styles.divider} />
-        {dateRange ? (
-          <>
-            <ReadOnlyRow
-              label="Dates"
-              value={`${dateRange}${nights !== null ? ` · ${nights} ${nights === 1 ? 'night' : 'nights'}` : ''}`}
-            />
-            <View style={styles.divider} />
-          </>
-        ) : null}
-        <EditableRow
-          label="Address"
-          value={record.address}
-          placeholder="Address"
-          onSave={(v) => onFieldSave('address', v)}
-        />
+        <EditableRow label="Address" value={record.address}
+          placeholder="Address" onSave={(v) => onFieldSave('address', v)} />
+        {record.check_in ? <>
+          <View style={styles.divider} />
+          <EditableRow label="Check-in time" value={record.check_in}
+            onSave={(v) => onFieldSave('check_in', v)} />
+        </> : null}
+        {record.check_out ? <>
+          <View style={styles.divider} />
+          <EditableRow label="Check-out time" value={record.check_out}
+            onSave={(v) => onFieldSave('check_out', v)} />
+        </> : null}
         <View style={styles.divider} />
-        <EditableRow
-          label="Check-in time"
-          value={record.check_in}
-          placeholder="e.g. 14:00"
-          onSave={(v) => onFieldSave('check_in', v)}
-        />
-        <View style={styles.divider} />
-        <EditableRow
-          label="Check-out time"
-          value={record.check_out}
-          placeholder="e.g. 11:00"
-          onSave={(v) => onFieldSave('check_out', v)}
-        />
-        <View style={styles.divider} />
-        <EditableRow
-          label="Confirmation ref"
-          value={record.confirmation_ref}
-          placeholder="Booking reference"
-          onSave={(v) => onFieldSave('confirmation_ref', v)}
-        />
+        <EditableRow label="Confirmation ref" value={record.confirmation_ref}
+          placeholder="Booking reference" onSave={(v) => onFieldSave('confirmation_ref', v)} />
       </View>
 
-      {/* Access */}
-      <SectionHeading label="Access" />
-      <View style={styles.card}>
-        <EditableRow
-          label="Wi-Fi name"
-          value={record.wifi_name}
-          placeholder="Network name"
-          onSave={(v) => onFieldSave('wifi_name', v)}
-        />
-        <View style={styles.divider} />
-        <EditableRow
-          label="Wi-Fi password"
-          value={record.wifi_password}
-          placeholder="Password"
-          onSave={(v) => onFieldSave('wifi_password', v)}
-        />
-        <View style={styles.divider} />
-        <EditableRow
-          label="Door code"
-          value={record.door_code}
-          placeholder="Entry code"
-          onSave={(v) => onFieldSave('door_code', v)}
-        />
-      </View>
+      {/* Airbnb: check-in section (only shown when at least one field has data) */}
+      {isAirbnb && airbnbCheckinItems.length > 0 ? (
+        <>
+          <SectionHeading label="Check-in" />
+          <View style={styles.card}>
+            {airbnbCheckinItems.map((item, i) => (
+              <React.Fragment key={i}>
+                {i > 0 && <View style={styles.divider} />}
+                {item}
+              </React.Fragment>
+            ))}
+          </View>
+        </>
+      ) : null}
+
+      {/* Hostel: room section (only shown when at least one field has data) */}
+      {isHostel && hostelRoomItems.length > 0 ? (
+        <>
+          <SectionHeading label="Room" />
+          <View style={styles.card}>
+            {hostelRoomItems.map((item, i) => (
+              <React.Fragment key={i}>
+                {i > 0 && <View style={styles.divider} />}
+                {item}
+              </React.Fragment>
+            ))}
+          </View>
+        </>
+      ) : null}
+
+      {/* Hostel: additional information (check-in instructions) */}
+      {isHostel && record.checkin_instructions ? (
+        <>
+          <SectionHeading label="Additional information" />
+          <View style={styles.card}>
+            <EditableRow key="instructions" label="Check-in instructions"
+              value={record.checkin_instructions}
+              onSave={(v) => onFieldSave('checkin_instructions', v)} />
+          </View>
+        </>
+      ) : null}
+
+      {/* Hotel / Booking.com / Hotels.com: room type (only if present and not hostel/airbnb) */}
+      {!isAirbnb && !isHostel && record.room_type ? (
+        <>
+          <SectionHeading label="Room" />
+          <View style={styles.card}>
+            <EditableRow label="Room type" value={record.room_type}
+              onSave={(v) => onFieldSave('room_type', v)} />
+          </View>
+        </>
+      ) : null}
+
+      {/* Access: only shown when at least one field has data */}
+      {accessItems.length > 0 ? (
+        <>
+          <SectionHeading label="Access" />
+          <View style={styles.card}>
+            {accessItems.map((item, i) => (
+              <React.Fragment key={item.key}>
+                {i > 0 && <View style={styles.divider} />}
+                <EditableRow label={item.label} value={item.value}
+                  onSave={(v) => onFieldSave(item.key, v)} />
+              </React.Fragment>
+            ))}
+          </View>
+        </>
+      ) : null}
     </>
   );
 }
@@ -992,12 +1087,13 @@ export default function BookingDetailScreen() {
       if (type === 'accommodation') {
         const { data, error: fetchErr } = await supabase
           .from('accommodation')
-          .select('id, stop_id, name, address, check_in_date, check_out_date, check_in, check_out, confirmation_ref, wifi_name, wifi_password, door_code')
+          .select('id, stop_id, name, address, check_in_date, check_out_date, check_in, check_out, confirmation_ref, wifi_name, wifi_password, door_code, accommodation_type, host_name, access_code, checkin_instructions, room_type, checkin_hours')
           .eq('id', id)
           .single();
         if (fetchErr || !data) {
           setError('Could not load accommodation details.');
         } else {
+          console.log('[booking-detail] fetched accommodation:', JSON.stringify(data));
           setAccommodation(data as unknown as AccommodationRecord);
         }
       } else if (source === 'saved_items') {
@@ -1433,6 +1529,27 @@ const styles = StyleSheet.create({
   heroText: { flex: 1, gap: 3 },
   heroTitle: { fontFamily: fonts.displayBold, fontSize: 17, color: colors.text, letterSpacing: -0.1 },
   heroSubtitle: { fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
+  heroTypeBadge: {
+    alignSelf: 'flex-start' as const,
+    backgroundColor: '#EBF3F6',
+    borderRadius: 5,
+    paddingHorizontal: 7, paddingVertical: 2,
+  },
+  heroTypeBadgeText: {
+    fontFamily: fonts.bodyBold, fontSize: 11, color: colors.primary, letterSpacing: 0.2,
+  },
+  accessCodeRow: {
+    flexDirection: 'row' as const, alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    paddingHorizontal: 16, paddingVertical: 14,
+    backgroundColor: '#FDF5EF',
+  },
+  accessCodeLeft: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 8 },
+  accessCodeLabel: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.text },
+  accessCodeValue: {
+    fontFamily: fonts.displayBold, fontSize: 22, color: colors.accent,
+    letterSpacing: 2,
+  },
 
   // Route card (flight)
   routeCard: {

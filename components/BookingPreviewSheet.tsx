@@ -169,6 +169,11 @@ function AccommodationDetails({ b }: { b: Extract<ParsedBooking, { type: 'accomm
       <DetailRow label="Check-out time" value={b.check_out_time} />
       {b.nights !== null && <DetailRow label="Nights" value={String(b.nights)} />}
       <DetailRow label="Booking ref"    value={b.booking_ref} />
+      <DetailRow label="Room type"      value={b.room_type} />
+      <DetailRow label="Host"           value={b.host_name} />
+      <DetailRow label="Access code"    value={b.access_code} />
+      <DetailRow label="Check-in info"  value={b.checkin_instructions} />
+      <DetailRow label="Check-in hours" value={b.checkin_hours} />
       <DetailRow label="Wi-Fi name"     value={b.wifi_name} />
       <DetailRow label="Wi-Fi password" value={b.wifi_password} />
     </>

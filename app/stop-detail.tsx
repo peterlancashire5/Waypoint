@@ -467,8 +467,19 @@ function SavedTransportCard({ booking, onPress }: { booking: TransportBooking; o
   );
 }
 
+function accommodationTypeLabel(t: AccommodationBooking['accommodation_type']): string {
+  switch (t) {
+    case 'airbnb':      return 'Airbnb';
+    case 'booking_com': return 'Booking.com';
+    case 'hotels_com':  return 'Hotels.com';
+    case 'hostel':      return 'Hostel';
+    default:            return 'Hotel';
+  }
+}
+
 function SavedAccommodationCard({ booking, onPress }: { booking: AccommodationBooking; onPress: () => void }) {
   const nights = booking.nights;
+  const typeLabel = accommodationTypeLabel(booking.accommodation_type);
   return (
     <Pressable
       style={({ pressed }) => [styles.savedCard, pressed && styles.savedCardPressed]}
@@ -488,12 +499,42 @@ function SavedAccommodationCard({ booking, onPress }: { booking: AccommodationBo
         </View>
         <Text style={styles.savedCardMeta}>
           {[
+            typeLabel,
             (booking.check_in_date || booking.check_out_date)
               ? formatDateRange(booking.check_in_date || null, booking.check_out_date || null)
               : null,
             nights !== null ? `${nights} ${nights === 1 ? 'night' : 'nights'}` : null,
           ].filter(Boolean).join(' · ')}
         </Text>
+        {booking.accommodation_type === 'airbnb' && (
+          <>
+            {booking.host_name ? (
+              <Text style={styles.savedCardDetail}>Host: {booking.host_name}</Text>
+            ) : null}
+            {booking.access_code ? (
+              <View style={styles.accessCodeRow}>
+                <Feather name="key" size={12} color={colors.accent} />
+                <Text style={styles.accessCodeText}>{booking.access_code}</Text>
+              </View>
+            ) : null}
+            {booking.checkin_instructions ? (
+              <Text style={styles.savedCardDetail} numberOfLines={2}>{booking.checkin_instructions}</Text>
+            ) : null}
+          </>
+        )}
+        {booking.accommodation_type === 'hostel' && (
+          <>
+            {booking.room_type ? (
+              <Text style={styles.savedCardDetail}>{booking.room_type}</Text>
+            ) : null}
+            {booking.checkin_hours ? (
+              <Text style={styles.savedCardDetail}>Check-in: {booking.checkin_hours}</Text>
+            ) : null}
+          </>
+        )}
+        {(booking.accommodation_type === 'hotel' || booking.accommodation_type === 'booking_com' || booking.accommodation_type === 'hotels_com') && booking.room_type ? (
+          <Text style={styles.savedCardDetail}>{booking.room_type}</Text>
+        ) : null}
       </View>
     </Pressable>
   );
@@ -677,13 +718,23 @@ const DEV_TRAIN: ParsedBooking = {
 
 const DEV_ACCOMMODATION: ParsedBooking = {
   type: 'accommodation',
+  accommodation_type: 'hotel',
   hotel_name: 'The Dhara Dhevi',
   address: '51/4 Moo 1, Chiang Mai-Sankampaeng Road, Chiang Mai, Thailand',
   city: 'Chiang Mai',
   check_in_date: '2025-04-02',
   check_out_date: '2025-04-05',
+  check_in_time: '14:00',
+  check_out_time: '11:00',
   booking_ref: 'HB-38821',
   nights: 3,
+  wifi_name: null,
+  wifi_password: null,
+  host_name: null,
+  access_code: null,
+  checkin_instructions: null,
+  room_type: 'Deluxe Garden Suite',
+  checkin_hours: null,
 };
 
 // ─── Logistics tab ────────────────────────────────────────────────────────────
@@ -1200,7 +1251,7 @@ export default function StopDetailScreen() {
     // Accommodation saved to this stop
     const { data: accs, error: accErr } = await supabase
       .from('accommodation')
-      .select('id, name, address, confirmation_ref, check_in_date, check_out_date')
+      .select('id, name, address, confirmation_ref, check_in_date, check_out_date, check_in, check_out, accommodation_type, host_name, access_code, checkin_instructions, room_type, checkin_hours')
       .eq('stop_id', stopData.id)
       .eq('owner_id', userId);
 
@@ -1216,13 +1267,23 @@ export default function StopDetailScreen() {
         _dbId: (a as any).id,
         _source: 'accommodation',
         type: 'accommodation',
+        accommodation_type: (a as any).accommodation_type ?? 'hotel',
         hotel_name: (a as any).name ?? '',
         address: (a as any).address ?? null,
         city: stopData.city,
         check_in_date: checkInDate,
         check_out_date: checkOutDate,
+        check_in_time: (a as any).check_in ?? null,
+        check_out_time: (a as any).check_out ?? null,
         booking_ref: (a as any).confirmation_ref ?? '',
         nights,
+        wifi_name: null,
+        wifi_password: null,
+        host_name: (a as any).host_name ?? null,
+        access_code: (a as any).access_code ?? null,
+        checkin_instructions: (a as any).checkin_instructions ?? null,
+        room_type: (a as any).room_type ?? null,
+        checkin_hours: (a as any).checkin_hours ?? null,
       });
     }
 
@@ -1471,9 +1532,17 @@ export default function StopDetailScreen() {
       if (result.canceled) return;
 
       const asset = result.assets[0];
+      console.log('[upload] uri:', asset.uri);
+      console.log('[upload] mimeType from picker:', asset.mimeType);
+      console.log('[upload] fileSize:', (asset as any).size ?? 'unknown');
       const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
+      console.log('[upload] detected mediaType:', rawMediaType);
       const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
+      console.log('[upload] final mediaType after prepare:', mediaType);
+      console.log('[upload] base64 length:', base64.length);
+      console.log('[upload] sending as:', mediaType === 'application/pdf' ? 'PDF document' : 'image');
       const parsed: ParsedContent = await parseBookingFile(base64, mediaType);
+      console.log('[upload] parsed result type:', parsed.type);
       if (parsed.type === 'place') {
         Alert.alert('Place detected', 'Use the Quick Capture button to save places to your trip.');
         return;
@@ -1481,6 +1550,7 @@ export default function StopDetailScreen() {
       setParsedBooking(parsed);
       setPreviewVisible(true);
     } catch (err: any) {
+      console.error('[upload] error:', err?.message, err);
       Alert.alert('Could not read booking', err?.message ?? 'Please try again.');
     } finally {
       setter(false);
@@ -1580,6 +1650,12 @@ export default function StopDetailScreen() {
           check_out: booking.check_out_time || null,
           wifi_name: booking.wifi_name || null,
           wifi_password: booking.wifi_password || null,
+          accommodation_type: booking.accommodation_type || 'hotel',
+          host_name: booking.host_name || null,
+          access_code: booking.access_code || null,
+          checkin_instructions: booking.checkin_instructions || null,
+          room_type: booking.room_type || null,
+          checkin_hours: booking.checkin_hours || null,
         });
         if (insertErr) throw new Error(insertErr.message);
 
@@ -1744,13 +1820,23 @@ export default function StopDetailScreen() {
       // Duplicate check using a minimal AccommodationBooking shape
       const fakeBooking: AccommodationBooking = {
         type: 'accommodation',
+        accommodation_type: 'hotel',
         hotel_name: data.name,
         address: data.address,
         city: stop?.city ?? '',
         check_in_date: data.check_in_date ?? '',
         check_out_date: data.check_out_date ?? '',
+        check_in_time: data.check_in_time ?? null,
+        check_out_time: data.check_out_time ?? null,
         booking_ref: data.confirmation_ref ?? '',
         nights: null,
+        wifi_name: data.wifi_name ?? null,
+        wifi_password: data.wifi_password ?? null,
+        host_name: null,
+        access_code: null,
+        checkin_instructions: null,
+        room_type: null,
+        checkin_hours: null,
       };
       const duplicate = await checkDuplicate(fakeBooking, userId);
       if (duplicate) {
@@ -2117,6 +2203,15 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border,
   },
   refBadgeText: { fontFamily: fonts.bodyBold, fontSize: 10, color: colors.textMuted, letterSpacing: 0.3 },
+  savedCardDetail: {
+    fontFamily: fonts.body, fontSize: 13, color: colors.textMuted, lineHeight: 18, marginTop: 2,
+  },
+  accessCodeRow: {
+    flexDirection: 'row' as const, alignItems: 'center' as const, gap: 5, marginTop: 4,
+  },
+  accessCodeText: {
+    fontFamily: fonts.bodyBold, fontSize: 14, color: colors.accent, letterSpacing: 0.5,
+  },
 
   // Upload cards
   uploadCard: {

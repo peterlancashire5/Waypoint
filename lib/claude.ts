@@ -36,8 +36,11 @@ export interface TransportBooking {
   port_terminal: string | null;
 }
 
+export type AccommodationType = 'airbnb' | 'booking_com' | 'hotels_com' | 'hostel' | 'hotel';
+
 export interface AccommodationBooking {
   type: 'accommodation';
+  accommodation_type: AccommodationType;
   hotel_name: string;
   address: string | null;         // full street address
   city: string;
@@ -49,6 +52,12 @@ export interface AccommodationBooking {
   nights: number | null;
   wifi_name: string | null;
   wifi_password: string | null;
+  // Provider-specific fields
+  host_name: string | null;            // Airbnb: host name
+  access_code: string | null;          // Airbnb: lockbox / door access code
+  checkin_instructions: string | null; // Airbnb: free-text check-in notes
+  room_type: string | null;            // Hotels / hostels: room type description
+  checkin_hours: string | null;        // Hostels: reception check-in hours
 }
 
 export interface OtherBooking {
@@ -250,11 +259,35 @@ origin_city / destination_city = city names only, not airport/station codes
 Populate only the fields relevant to the detected transport type; set irrelevant fields to null.
 
 Accommodation booking:
-{"content_type":"booking","type":"accommodation","hotel_name":"...","address":"full street address or null","city":"...","check_in_date":"YYYY-MM-DD","check_out_date":"YYYY-MM-DD","check_in_time":"HH:MM or null","check_out_time":"HH:MM or null","booking_ref":"...","nights":null,"wifi_name":null,"wifi_password":null}
+{"content_type":"booking","type":"accommodation","accommodation_type":"hotel","hotel_name":"...","address":"full street address or null","city":"...","check_in_date":"YYYY-MM-DD","check_out_date":"YYYY-MM-DD","check_in_time":"HH:MM or null","check_out_time":"HH:MM or null","booking_ref":"...","nights":null,"wifi_name":null,"wifi_password":null,"host_name":null,"access_code":null,"checkin_instructions":null,"room_type":null,"checkin_hours":null}
+
+accommodation_type: identify the provider using the rules below. Check each in order and use the first match.
+
+"booking_com" — Booking.com logo/name present, or booking.com domain in email/text.
+"hotels_com"  — Hotels.com logo/name present, or hotels.com domain in email/text.
+"hostel"      — classify as hostel if ANY of these are present: "Hostelworld" branding or hostelworld.com domain; "HostelBookers"; the word "hostel" in the property name or document; "dorm", "dormitory", "bed in dorm", "mixed dorm", "female dorm", "male dorm"; "reception hours", "reception open", "check-in hours". Do NOT require multiple signals — one strong signal is enough.
+"airbnb"      — score these signals, classify as "airbnb" if 2 or more are present:
+  (1) "airbnb" appears anywhere in text, header, or branding
+  (2) "airbnb.com" in any URL or email address
+  (3) "Hosted by [name]", "Your Host", or "Meet your host" with a person's name
+  (4) "Superhost" label or badge
+  (5) "House Rules" section
+  (6) Self check-in instructions: lockbox code, keypad code, key safe, smart lock, or access code for entering the property
+  (7) "Message your host", "Contact your host", or "Message [name]"
+  (8) Residential property name style: e.g. "Sunny Apartment", "Cosy Studio", "Bright Flat", "Room in [house]", "Entire home", "Private room in [house]" — as opposed to "Grand Hotel", "Marriott", "Hilton", etc.
+  This also covers Vrbo, HomeAway, and any vacation rental with a host + self check-in.
+"hotel"       — default: direct hotel email, unrecognised provider, or anything that doesn't match the above.
+
+host_name: for Airbnb, the host's name (e.g. "Maria"). Null for all other types.
+access_code: the primary door, lockbox, or key-safe code for getting into the property (e.g. "3847", "B2C9#"). Scan the entire document including check-in instructions — Airbnb often puts it in a "How to get in" or "Key access" section. If multiple codes exist (e.g. building code + lockbox code), prefer the lockbox/property entry code. Null if none found.
+checkin_instructions: the full free-text check-in notes (e.g. "Key is under the mat", "Use the side entrance, ring bell 3, lockbox code is 1926"). Copy the complete instruction text. Null if not present.
+room_type: the room/bed type string (e.g. "Deluxe Double Room", "Standard Twin", "6-bed mixed dorm", "Private room"). Null if not present.
+checkin_hours: reception or check-in window (e.g. "8am–10pm", "14:00–22:00", "24-hour reception"). Null if not present.
 
 address = full street address (e.g. "Cankarjevo Nabrezje 27, Ljubljana, Slovenia"). Set to null only if absent.
 check_in_time / check_out_time = 24h HH:MM. Convert 12h AM/PM. Null if not shown.
 wifi_name / wifi_password = Wi-Fi credentials if present. Null if not shown.
+Handle confirmations written in any language (English, Spanish, French, Italian, German, Portuguese, etc.).
 
 Other document (booking-like but unrecognised):
 {"content_type":"booking","type":"other","description":"...","city":null,"date":null}
@@ -267,6 +300,8 @@ export async function parseBookingFile(
 ): Promise<ParsedContent> {
   const apiKey = process.env.EXPO_PUBLIC_ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('Anthropic API key is not configured.');
+
+  console.log('[claude] parseBookingFile called — mediaType:', mediaType, 'base64 length:', base64.length);
 
   const fileContent =
     mediaType === 'application/pdf'
@@ -282,6 +317,8 @@ export async function parseBookingFile(
             data: base64,
           },
         };
+
+  console.log('[claude] sending as content type:', fileContent.type);
 
   const response = await fetch(API_URL, {
     method: 'POST',
@@ -306,13 +343,17 @@ export async function parseBookingFile(
     }),
   });
 
+  console.log('[claude] API response status:', response.status);
+
   if (!response.ok) {
     const err = await response.json().catch(() => ({}));
+    console.error('[claude] API error body:', JSON.stringify(err));
     throw new Error((err as any)?.error?.message ?? `API error ${response.status}`);
   }
 
   const data = await response.json();
   const text: string = (data as any).content?.[0]?.text ?? '';
+  console.log('[claude] raw response text:', text);
 
   try {
     const raw = JSON.parse(text);

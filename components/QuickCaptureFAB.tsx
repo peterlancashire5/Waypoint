@@ -130,21 +130,29 @@ async function saveBooking(
   tripId?: string | null,
 ): Promise<SavedRecord | null> {
   if (booking.type === 'accommodation' && stopId) {
+    const insertPayload = {
+      stop_id: stopId,
+      owner_id: userId,
+      name: booking.hotel_name,
+      address: booking.address || null,
+      confirmation_ref: booking.booking_ref || null,
+      check_in_date: booking.check_in_date || null,
+      check_out_date: booking.check_out_date || null,
+      check_in: booking.check_in_time || null,
+      check_out: booking.check_out_time || null,
+      wifi_name: booking.wifi_name || null,
+      wifi_password: booking.wifi_password || null,
+      accommodation_type: booking.accommodation_type || 'hotel',
+      host_name: booking.host_name || null,
+      access_code: booking.access_code || null,
+      checkin_instructions: booking.checkin_instructions || null,
+      room_type: booking.room_type || null,
+      checkin_hours: booking.checkin_hours || null,
+    };
+    console.log('[saveBooking] accommodation insert payload:', JSON.stringify(insertPayload));
     const { data, error } = await supabase
       .from('accommodation')
-      .insert({
-        stop_id: stopId,
-        owner_id: userId,
-        name: booking.hotel_name,
-        address: booking.address || null,
-        confirmation_ref: booking.booking_ref || null,
-        check_in_date: booking.check_in_date || null,
-        check_out_date: booking.check_out_date || null,
-        check_in: booking.check_in_time || null,
-        check_out: booking.check_out_time || null,
-        wifi_name: booking.wifi_name || null,
-        wifi_password: booking.wifi_password || null,
-      })
+      .insert(insertPayload)
       .select('id')
       .single();
     if (error || !data) throw new Error(error?.message ?? 'Save failed');
@@ -1012,7 +1020,9 @@ export default function QuickCaptureFAB() {
       }
 
       setSaving(true);
-      const savedGap = allLegGaps.find((g) => g.id === stopId);
+      // Only transport/connection bookings can match a leg gap — accommodation always goes to a stop
+      const isTransportBooking = booking.type === 'transport' || booking.type === 'connection';
+      const savedGap = isTransportBooking ? allLegGaps.find((g) => g.id === stopId) : null;
       await saveBooking(booking, stopId, session.user.id, savedGap?.tripId ?? null);
       setPreviewVisible(false);
       setParsedBooking(null);
