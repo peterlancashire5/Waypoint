@@ -61,6 +61,8 @@ create policy "profiles: users can update own"
 
 A `SECURITY DEFINER` trigger fires on `auth.users` insert and copies `email` into `profiles`. This is the standard Supabase pattern for making user info accessible without exposing `auth.users` directly.
 
+**The trigger is the only insert path into `profiles`.** There is no client-side insert — the app never calls `supabase.from('profiles').insert(...)`. The trigger's `SECURITY DEFINER` context bypasses RLS, so no INSERT policy is required. The backfill SQL runs as a superuser in the SQL Editor and also bypasses RLS. If a user existed before the trigger was added and the backfill was not run, their profile row will be missing and collaborator queries will return `null` for their email — so verifying backfill coverage is critical before deploying.
+
 ```sql
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public
@@ -105,14 +107,14 @@ on conflict (id) do nothing;
 
 Single `useFocusEffect` fetch loading:
 - `trips`: `id, name, owner_id`
-- Owner profile: `profiles` joined via `owner_id`
+- Owner profile: `profiles` joined via `owner_id` using PostgREST alias syntax
 - Collaborators: `trip_members` joined with `profiles` on `user_id`
 
 Query pattern:
 ```ts
 supabase
   .from('trips')
-  .select('id, name, owner_id, profiles!owner_id(email, display_name)')
+  .select('id, name, owner_id, owner:owner_id(email, display_name)')
   .eq('id', tripId)
   .single()
 
@@ -121,6 +123,8 @@ supabase
   .select('user_id, profiles(email, display_name)')
   .eq('trip_id', tripId)
 ```
+
+The `owner:owner_id(...)` syntax is the standard PostgREST FK alias pattern (per codebase convention). `profiles!owner_id(...)` would require the FK constraint to be named exactly `owner_id` — do not use that form.
 
 ### Sections
 
@@ -141,14 +145,14 @@ supabase
 - Red ghost button at bottom of screen
 - Confirmation: "Leave this trip? You'll lose access to this trip and its itinerary."
 - On confirm: `supabase.from('trip_members').delete().eq('trip_id', tripId).eq('user_id', userId)`
-- Then `router.replace('/(main)/')` (navigate to trips tab)
+- Then `router.replace('/(main)/trips')` (navigate to trips list tab, not map)
 
 #### Delete trip (owner only)
 - Red ghost button at bottom of screen
 - Confirmation: "Delete this trip? This will permanently delete the trip for all collaborators."
 - On confirm: `supabase.from('trips').delete().eq('id', tripId)`
 - Cascade deletes all related rows (stops, legs, accommodation, etc.)
-- Then `router.replace('/(main)/')` (navigate to trips tab)
+- Then `router.replace('/(main)/trips')` (navigate to trips list tab, not map)
 
 #### Remove collaborator (creator only, per row)
 - Confirmation: "Remove [email]? They'll lose access to this trip."
@@ -210,16 +214,60 @@ Visual style: teal background (`colors.primary`) with white initials text, `-8px
 
 ### Query change
 
-Extend the trips query in `(main)/trips.tsx`:
+The trips list must show two sets of trips:
+1. Trips owned by the user (`owner_id = user.id`) — existing query
+2. Trips where the user is a collaborator (rows in `trip_members` where `user_id = user.id`) — new query
+
+Two separate queries, merged and deduplicated by `id`:
+
 ```ts
-supabase
+// Query 1: owned trips
+const { data: ownedTrips } = await supabase
   .from('trips')
   .select('*, stops(city), trip_members(user_id)')
   .eq('owner_id', user.id)
-  .order('created_at', { ascending: false })
+  .order('created_at', { ascending: false });
+
+// Query 2: trips where user is a member
+const { data: memberRows } = await supabase
+  .from('trip_members')
+  .select('trip_id')
+  .eq('user_id', user.id);
+
+const memberTripIds = (memberRows ?? []).map(r => r.trip_id);
+
+let sharedTrips: DbTrip[] = [];
+if (memberTripIds.length > 0) {
+  const { data } = await supabase
+    .from('trips')
+    .select('*, stops(city), trip_members(user_id)')
+    .in('id', memberTripIds)
+    .order('created_at', { ascending: false });
+  sharedTrips = data ?? [];
+}
+
+// Merge, dedup by id, owned trips first
+const allTrips = [
+  ...(ownedTrips ?? []),
+  ...sharedTrips.filter(t => !(ownedTrips ?? []).find(o => o.id === t.id)),
+];
 ```
 
-PostgREST fetches nested `trip_members` rows in one query — no N+1.
+> Note: Phase 3 will consider whether a Supabase RPC/view is cleaner for this. For Phase 2 two queries is acceptable and explicit.
+
+### Type changes
+
+`DbTrip` gains:
+```ts
+trip_members: { user_id: string }[];
+```
+
+`TripSummary` gains:
+```ts
+memberCount: number;
+```
+
+`toTripSummary` maps: `memberCount: t.trip_members.length`.
 
 ### Rendering
 
