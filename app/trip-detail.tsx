@@ -1129,6 +1129,16 @@ export default function TripDetailScreen() {
               <Feather name="edit-2" size={15} color={colors.text} style={styles.menuIcon} />
               <Text style={styles.menuItemText}>Edit Stops</Text>
             </Pressable>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuVisible(false);
+                router.push({ pathname: '/trip-settings', params: { tripId } });
+              }}
+            >
+              <Feather name="settings" size={15} color={colors.text} style={styles.menuIcon} />
+              <Text style={styles.menuItemText}>Trip Settings</Text>
+            </Pressable>
           </View>
         </Pressable>
       </Modal>
