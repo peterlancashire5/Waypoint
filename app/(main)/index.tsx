@@ -7,7 +7,7 @@ import {
   Pressable,
   ScrollView,
 } from 'react-native';
-import MapView, { Marker, Polyline, PROVIDER_DEFAULT } from 'react-native-maps';
+import MapView, { Callout, CalloutSubview, Marker, Polyline, PROVIDER_DEFAULT } from 'react-native-maps';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -18,10 +18,12 @@ import Animated, {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { Feather } from '@expo/vector-icons';
+import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import { fetchPlacesForStop, type SavedPlace } from '@/lib/savedPlaceUtils';
+import type { PlaceCategory } from '@/lib/placesEnrichment';
 import QuickCaptureFAB from '@/components/QuickCaptureFAB';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -168,6 +170,47 @@ function MapPin({ stop, index, isSelected, onPress }: {
   );
 }
 
+// ─── Place Pin ────────────────────────────────────────────────────────────────
+
+type MciName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+const PLACE_CATEGORY_CONFIG: Record<PlaceCategory, { icon: MciName; bg: string; fg: string }> = {
+  Restaurants: { icon: 'silverware-fork-knife', bg: '#C07A4F', fg: '#fff' },
+  Bars:        { icon: 'glass-cocktail',        bg: '#5B5EA6', fg: '#fff' },
+  Museums:     { icon: 'bank-outline',           bg: '#2C5F6E', fg: '#fff' },
+  Activities:  { icon: 'hiking',                 bg: '#2E7D5A', fg: '#fff' },
+  Sights:      { icon: 'camera-outline',         bg: '#B07D2A', fg: '#fff' },
+  Shopping:    { icon: 'shopping-outline',        bg: '#8B4F7A', fg: '#fff' },
+  Other:       { icon: 'map-marker-outline',      bg: '#7A7570', fg: '#fff' },
+};
+
+function placeCfg(category: PlaceCategory | null | undefined) {
+  return category ? (PLACE_CATEGORY_CONFIG[category] ?? PLACE_CATEGORY_CONFIG.Other) : PLACE_CATEGORY_CONFIG.Other;
+}
+
+function PlacePin({ place, onCalloutPress }: { place: SavedPlace; onCalloutPress: () => void }) {
+  if (place.latitude === null || place.longitude === null) return null;
+  const cfg = placeCfg(place.category);
+  return (
+    <Marker
+      coordinate={{ latitude: place.latitude, longitude: place.longitude }}
+      anchor={{ x: 0.5, y: 0.5 }}
+      tracksViewChanges={false}
+    >
+      <View style={[styles.placePinWrap, { backgroundColor: cfg.bg }]}>
+        <MaterialCommunityIcons name={cfg.icon} size={13} color={cfg.fg} />
+      </View>
+      <Callout tooltip onPress={onCalloutPress}>
+        <CalloutSubview onPress={onCalloutPress} style={styles.callout}>
+          <Text style={styles.calloutName} numberOfLines={1}>{place.name}</Text>
+          {!!place.category && (
+            <Text style={styles.calloutCategory}>{place.category}</Text>
+          )}
+        </CalloutSubview>
+      </Callout>
+    </Marker>
+  );
+}
+
 // ─── City Chip ────────────────────────────────────────────────────────────────
 
 function CityChip({ stop, index, isSelected, onPress }: {
@@ -215,6 +258,10 @@ export default function HomeScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(null);
+  const [stopPlaces, setStopPlaces] = useState<SavedPlace[]>([]);
+  const placesCache = useRef<Map<string, SavedPlace[]>>(new Map());
+  const loadingForStopId = useRef<string | null>(null);
+  const justSelectedMarker = useRef(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -222,6 +269,7 @@ export default function HomeScreen() {
         setLoading(true);
         setError(null);
         setSelectedStopId(null);
+        setStopPlaces([]);
 
         const { data: { session } } = await supabase.auth.getSession();
         const user = session?.user;
@@ -302,18 +350,54 @@ export default function HomeScreen() {
       };
 
       fetch();
+
+      return () => {
+        placesCache.current.clear();
+        setStopPlaces([]);
+        setSelectedStopId(null);
+        loadingForStopId.current = null;
+      };
     }, [])
   );
 
+  function zoomToStop(stop: Stop) {
+    if (stop.lat === null || stop.lng === null) return;
+    mapRef.current?.animateToRegion(
+      { latitude: stop.lat - 0.02, longitude: stop.lng, latitudeDelta: 0.07, longitudeDelta: 0.07 },
+      400,
+    );
+  }
+
   function handleStopSelect(stop: Stop) {
+    justSelectedMarker.current = true;
+    setTimeout(() => { justSelectedMarker.current = false; }, 200);
+
     const isAlreadySelected = selectedStopId === stop.id;
-    setSelectedStopId(isAlreadySelected ? null : stop.id);
-    if (!isAlreadySelected && stop.lat !== null && stop.lng !== null) {
-      mapRef.current?.animateToRegion(
-        { latitude: stop.lat - 0.5, longitude: stop.lng, latitudeDelta: 4, longitudeDelta: 4 },
-        400,
-      );
+    if (isAlreadySelected) {
+      setSelectedStopId(null);
+      setStopPlaces([]);
+      loadingForStopId.current = null;
+      return;
     }
+
+    setSelectedStopId(stop.id);
+    setStopPlaces([]);
+    zoomToStop(stop);
+
+    // Fetch places (use cache if available)
+    const cached = placesCache.current.get(stop.id);
+    if (cached) {
+      setStopPlaces(cached.filter((p) => p.latitude !== null && p.longitude !== null));
+      return;
+    }
+
+    loadingForStopId.current = stop.id;
+    fetchPlacesForStop(stop.id).then((places) => {
+      if (loadingForStopId.current !== stop.id) return; // stale
+      const withCoords = places.filter((p) => p.latitude !== null && p.longitude !== null);
+      placesCache.current.set(stop.id, places);
+      setStopPlaces(withCoords);
+    }).catch(() => { /* silent */ });
   }
 
   // ── Loading ────────────────────────────────────────────────────────────────
@@ -372,6 +456,12 @@ export default function HomeScreen() {
         showsUserLocation={false}
         showsCompass={false}
         pitchEnabled={false}
+        onPress={() => {
+          if (justSelectedMarker.current) return;
+          setSelectedStopId(null);
+          setStopPlaces([]);
+          loadingForStopId.current = null;
+        }}
       >
         {polylineCoords.length > 1 && (
           <Polyline
@@ -393,6 +483,13 @@ export default function HomeScreen() {
             index={index}
             isSelected={selectedStopId === stop.id}
             onPress={() => handleStopSelect(stop)}
+          />
+        ))}
+        {stopPlaces.map((place) => (
+          <PlacePin
+            key={place.id}
+            place={place}
+            onCalloutPress={() => router.push({ pathname: '/place-detail', params: { placeId: place.id } })}
           />
         ))}
       </MapView>
@@ -546,5 +643,18 @@ const styles = StyleSheet.create({
   },
   viewTripLabel: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.primary },
 
-
+  // Place pins
+  placePinWrap: {
+    width: 26, height: 26, borderRadius: 13,
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.2, shadowRadius: 3, elevation: 3,
+    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.6)',
+  },
+  callout: {
+    backgroundColor: colors.white, borderRadius: 10, padding: 10,
+    minWidth: 120, maxWidth: 200,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.12, shadowRadius: 8, elevation: 6,
+  },
+  calloutName: { fontFamily: fonts.bodyBold, fontSize: 13, color: colors.text, marginBottom: 2 },
+  calloutCategory: { fontFamily: fonts.body, fontSize: 11, color: colors.textMuted },
 });
