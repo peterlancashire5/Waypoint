@@ -1064,6 +1064,7 @@ function SavedTab({
   onPlaceAdded: (place: SavedPlace) => void;
 }) {
   const router = useRouter();
+  const { isOnline, showOfflineToast } = useNetworkStatus();
   const [activeFilter, setActiveFilter] = useState<string>('All');
   const [addSheetVisible, setAddSheetVisible] = useState(false);
   const [localPlaces, setLocalPlaces] = useState<SavedPlace[]>(places);
@@ -1128,8 +1129,11 @@ function SavedTab({
 
         {/* Add place manually */}
         <Pressable
-          style={({ pressed }) => [styles.addPlaceButton, pressed && { opacity: 0.8 }]}
-          onPress={() => setAddSheetVisible(true)}
+          style={({ pressed }) => [styles.addPlaceButton, !isOnline && { opacity: 0.4 }, pressed && { opacity: 0.8 }]}
+          onPress={() => {
+            if (!isOnline) { showOfflineToast(); return; }
+            setAddSheetVisible(true);
+          }}
         >
           <Feather name="plus" size={15} color={colors.primary} style={{ marginRight: 6 }} />
           <Text style={styles.addPlaceButtonText}>Add place manually</Text>
