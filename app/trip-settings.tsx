@@ -40,11 +40,10 @@ function getInitials(email: string): string {
 interface CollaboratorRowProps {
   collab: Collaborator;
   isCurrentUserOwner: boolean;
-  currentUserId: string | null;
   onRemove: (collab: Collaborator) => void;
 }
 
-function CollaboratorRow({ collab, isCurrentUserOwner, currentUserId, onRemove }: CollaboratorRowProps) {
+function CollaboratorRow({ collab, isCurrentUserOwner, onRemove }: CollaboratorRowProps) {
   const showRemove = isCurrentUserOwner && !collab.isOwner;
 
   return (
@@ -302,7 +301,6 @@ export default function TripSettingsScreen() {
               key={collab.id}
               collab={collab}
               isCurrentUserOwner={isOwner}
-              currentUserId={currentUserId}
               onRemove={handleRemoveCollaborator}
             />
           ))}
