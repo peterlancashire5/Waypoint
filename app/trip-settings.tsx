@@ -270,6 +270,7 @@ export default function TripSettingsScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
+            if (!tripId) return;
             const { error: deleteError } = await supabase
               .from('trips')
               .delete()
