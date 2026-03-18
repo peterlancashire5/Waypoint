@@ -25,6 +25,7 @@ interface TripSummary {
   dateRange: string;
   stopCount: number;
   chips: string[];
+  memberCount: number;
 }
 
 interface DbTrip {
@@ -36,6 +37,7 @@ interface DbTrip {
   status: 'upcoming' | 'active' | 'past';
   created_at: string;
   stops: { city: string }[];
+  trip_members: { user_id: string }[];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -63,6 +65,7 @@ function toTripSummary(t: DbTrip): TripSummary {
     dateRange: formatDateRange(t.start_date, t.end_date),
     stopCount: t.stops.length,
     chips: t.stops.map((s) => s.city).filter(Boolean),
+    memberCount: t.trip_members.length,
   };
 }
 
@@ -101,6 +104,13 @@ function TripCard({ trip, onPress }: { trip: TripSummary; onPress?: () => void }
         <Text style={styles.cardStops}>
           {trip.stopCount} {trip.stopCount === 1 ? 'stop' : 'stops'}
         </Text>
+        {trip.memberCount > 0 && (
+          <>
+            <Text style={styles.cardDot}>·</Text>
+            <Feather name="users" size={13} color={colors.textMuted} />
+            <Text style={styles.cardShared}>Shared</Text>
+          </>
+        )}
       </View>
 
       {trip.chips.length > 0 && (
@@ -140,32 +150,60 @@ export default function TripsScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const fetchTrips = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+
+    const { data: { session } } = await supabase.auth.getSession();
+    const user = session?.user;
+    if (!user) { setLoading(false); return; }
+
+    // Query 1: trips owned by this user
+    const { data: ownedData, error: ownedError } = await supabase
+      .from('trips')
+      .select('*, stops(city), trip_members(user_id)')
+      .eq('owner_id', user.id)
+      .order('created_at', { ascending: false });
+
+    if (ownedError) {
+      setError('Could not load trips.');
+      setLoading(false);
+      return;
+    }
+
+    // Query 2: trips where user is a non-owner member
+    const { data: memberRows } = await supabase
+      .from('trip_members')
+      .select('trip_id')
+      .eq('user_id', user.id);
+
+    const memberTripIds = (memberRows ?? []).map((r: { trip_id: string }) => r.trip_id);
+
+    let sharedData: DbTrip[] = [];
+    if (memberTripIds.length > 0) {
+      const { data } = await supabase
+        .from('trips')
+        .select('*, stops(city), trip_members(user_id)')
+        .in('id', memberTripIds)
+        .order('created_at', { ascending: false });
+      sharedData = (data ?? []) as DbTrip[];
+    }
+
+    // Merge: owned first, then shared trips not already in owned set
+    const ownedIds = new Set((ownedData ?? []).map((t: DbTrip) => t.id));
+    const allTrips = [
+      ...(ownedData ?? []) as DbTrip[],
+      ...sharedData.filter((t) => !ownedIds.has(t.id)),
+    ];
+
+    setTrips(allTrips.map(toTripSummary));
+    setLoading(false);
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
-      const fetchTrips = async () => {
-        setLoading(true);
-        setError(null);
-
-        const { data: { session } } = await supabase.auth.getSession();
-        const user = session?.user;
-        if (!user) { setLoading(false); return; }
-
-        const { data, error: fetchError } = await supabase
-          .from('trips')
-          .select('*, stops(city)')
-          .eq('owner_id', user.id)
-          .order('created_at', { ascending: false });
-
-        if (fetchError) {
-          setError('Could not load trips.');
-        } else {
-          setTrips((data as DbTrip[]).map(toTripSummary));
-        }
-        setLoading(false);
-      };
-
       fetchTrips();
-    }, [])
+    }, [fetchTrips])
   );
 
   const upcoming = trips.filter((t) => t.status === 'Upcoming');
@@ -324,4 +362,5 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary, paddingHorizontal: 22, paddingVertical: 13, borderRadius: 14,
   },
   emptyButtonText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.white },
+  cardShared: { fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
 });
