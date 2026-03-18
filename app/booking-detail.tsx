@@ -13,12 +13,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
 import { deleteTransportBooking, deleteConnectionBooking } from '@/lib/journeyUtils';
 import { transportIcon } from '@/components/BookingPreviewSheet';
 import type { TransportType } from '@/lib/claude';
+import { useNetworkStatus } from '@/context/NetworkContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1066,6 +1068,8 @@ export default function BookingDetailScreen() {
     source: 'accommodation' | 'leg_bookings' | 'saved_items';
   }>();
 
+  const { isOnline, showOfflineToast } = useNetworkStatus();
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -1084,6 +1088,25 @@ export default function BookingDetailScreen() {
         return;
       }
 
+      // Offline fallback — restore from per-record cache
+      if (!isOnline) {
+        try {
+          const raw = await AsyncStorage.getItem(`waypoint_cache_booking_${id}`);
+          if (raw) {
+            const cached = JSON.parse(raw);
+            if (cached.accommodation) setAccommodation(cached.accommodation);
+            if (cached.journeyDetail) setJourneyDetail(cached.journeyDetail);
+            if (cached.savedItemTransport) setSavedItemTransport(cached.savedItemTransport);
+          } else {
+            setError('No saved data available.');
+          }
+        } catch {
+          setError('No saved data available.');
+        }
+        setLoading(false);
+        return;
+      }
+
       if (type === 'accommodation') {
         const { data, error: fetchErr } = await supabase
           .from('accommodation')
@@ -1094,7 +1117,13 @@ export default function BookingDetailScreen() {
           setError('Could not load accommodation details.');
         } else {
           console.log('[booking-detail] fetched accommodation:', JSON.stringify(data));
-          setAccommodation(data as unknown as AccommodationRecord);
+          const accomData = data as unknown as AccommodationRecord;
+          setAccommodation(accomData);
+          // Cache for offline — fire and forget
+          AsyncStorage.setItem(
+            `waypoint_cache_booking_${id}`,
+            JSON.stringify({ accommodation: accomData }),
+          ).catch(() => {});
         }
       } else if (source === 'saved_items') {
         // Transport stored as JSON in saved_items.note
@@ -1108,7 +1137,7 @@ export default function BookingDetailScreen() {
         } else {
           try {
             const parsed = JSON.parse((data as any).note ?? '{}');
-            setSavedItemTransport({
+            const transportData: SavedItemTransportRecord = {
               id: (data as any).id,
               transport_type: parsed.transport_type ?? 'flight',
               operator: parsed.operator ?? parsed.airline ?? null,
@@ -1136,7 +1165,13 @@ export default function BookingDetailScreen() {
               port_terminal: parsed.port_terminal ?? null,
               is_connection: parsed.is_connection === true,
               legs: parsed.is_connection ? parsed.legs : undefined,
-            });
+            };
+            setSavedItemTransport(transportData);
+            // Cache for offline — fire and forget
+            AsyncStorage.setItem(
+              `waypoint_cache_booking_${id}`,
+              JSON.stringify({ savedItemTransport: transportData }),
+            ).catch(() => {});
           } catch {
             setError('Could not parse transport details.');
           }
@@ -1173,18 +1208,24 @@ export default function BookingDetailScreen() {
             : Promise.resolve({ data: [lb], error: null }),
         ]);
 
-        setJourneyDetail({
+        const journeyData: JourneyDetail = {
           journey: (journeyResult as any).data as JourneyRecord | null,
           legBookings: ((allLbResult as any).data ?? [lb]) as JourneyLegBooking[],
           tripLeg: (tripLegResult as any).data as TripLeg | null,
           primaryLbId: (lb as any).id,
-        });
+        };
+        setJourneyDetail(journeyData);
+        // Cache for offline — fire and forget
+        AsyncStorage.setItem(
+          `waypoint_cache_booking_${id}`,
+          JSON.stringify({ journeyDetail: journeyData }),
+        ).catch(() => {});
       }
 
       setLoading(false);
     };
     load();
-  }, [id, type, source]);
+  }, [id, type, source, isOnline]);
 
   // ── Save a field ────────────────────────────────────────────────────────────
 
@@ -1462,8 +1503,11 @@ export default function BookingDetailScreen() {
         {/* Delete */}
         <View style={styles.deleteSection}>
           <Pressable
-            style={({ pressed }) => [styles.deleteButton, pressed && styles.deleteButtonPressed]}
-            onPress={handleDeletePress}
+            style={({ pressed }) => [styles.deleteButton, pressed && styles.deleteButtonPressed, !isOnline && { opacity: 0.4 }]}
+            onPress={() => {
+              if (!isOnline) { showOfflineToast(); return; }
+              handleDeletePress();
+            }}
             disabled={deleting}
           >
             {deleting ? (
