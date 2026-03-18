@@ -92,6 +92,11 @@ interface EditableStop {
   longitude: number | null;
 }
 
+interface CollaboratorProfile {
+  id: string;
+  email: string;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -336,6 +341,61 @@ function EditableStopCard({
   );
 }
 
+// ─── AvatarStack ─────────────────────────────────────────────────────────────
+
+function getInitials(email: string): string {
+  return email.slice(0, 2).toUpperCase();
+}
+
+interface AvatarStackProps {
+  profiles: CollaboratorProfile[];
+  onPress: () => void;
+}
+
+function AvatarStack({ profiles, onPress }: AvatarStackProps) {
+  if (profiles.length === 0) return null;
+
+  const visible = profiles.slice(0, 3);
+  const overflow = profiles.length - visible.length;
+
+  return (
+    <Pressable style={avatarStackStyles.row} onPress={onPress} hitSlop={8}>
+      {visible.map((p, i) => (
+        <View
+          key={p.id}
+          style={[
+            avatarStackStyles.avatar,
+            i > 0 && avatarStackStyles.avatarOverlap,
+          ]}
+        >
+          <Text style={avatarStackStyles.initials}>{getInitials(p.email)}</Text>
+        </View>
+      ))}
+      {overflow > 0 && (
+        <View style={[avatarStackStyles.avatar, avatarStackStyles.avatarOverlap, avatarStackStyles.overflowAvatar]}>
+          <Text style={avatarStackStyles.overflowText}>+{overflow}</Text>
+        </View>
+      )}
+      <Feather name="chevron-right" size={14} color={colors.textMuted} style={avatarStackStyles.chevron} />
+    </Pressable>
+  );
+}
+
+const avatarStackStyles = StyleSheet.create({
+  row: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
+  avatar: {
+    width: 26, height: 26, borderRadius: 13,
+    backgroundColor: colors.primary,
+    borderWidth: 2, borderColor: colors.white,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  avatarOverlap: { marginLeft: -8 },
+  initials: { fontFamily: fonts.bodyBold, fontSize: 10, color: '#FFFFFF' },
+  overflowAvatar: { backgroundColor: colors.textMuted },
+  overflowText: { fontFamily: fonts.bodyBold, fontSize: 10, color: '#FFFFFF' },
+  chevron: { marginLeft: 4 },
+});
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function TripDetailScreen() {
@@ -361,6 +421,9 @@ export default function TripDetailScreen() {
   const [deletedStopIds, setDeletedStopIds] = useState<string[]>([]);
   const [showAddStop, setShowAddStop] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
+
+  // Collaborators (for avatar stack on shared trips)
+  const [collaboratorProfiles, setCollaboratorProfiles] = useState<CollaboratorProfile[]>([]);
 
   // Toast
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -514,6 +577,24 @@ export default function TripDetailScreen() {
     }
 
     setItinerary(buildItinerary(sortedStops, sortedLegs, allTransport));
+
+    // Fetch collaborators for avatar stack (non-blocking)
+    const { data: memberRows } = await supabase
+      .from('trip_members')
+      .select('user_id')
+      .eq('trip_id', tripId!);
+
+    if (memberRows && memberRows.length > 0) {
+      const memberIds = memberRows.map((m: { user_id: string }) => m.user_id);
+      const { data: profileRows } = await supabase
+        .from('profiles')
+        .select('id, email')
+        .in('id', memberIds);
+      setCollaboratorProfiles((profileRows ?? []) as CollaboratorProfile[]);
+    } else {
+      setCollaboratorProfiles([]);
+    }
+
     setLoading(false);
   }, [tripId]);
 
@@ -1009,6 +1090,10 @@ export default function TripDetailScreen() {
           </View>
           <Text style={styles.tripName}>{trip.name}</Text>
           {meta ? <Text style={styles.tripDetails}>{meta}</Text> : null}
+          <AvatarStack
+            profiles={collaboratorProfiles}
+            onPress={() => router.push({ pathname: '/trip-settings', params: { tripId } })}
+          />
         </View>
       </SafeAreaView>
 
