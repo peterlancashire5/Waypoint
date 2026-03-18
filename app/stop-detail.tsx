@@ -44,6 +44,8 @@ import { createTransportBooking, saveConnectionBooking, buildExtraData } from '@
 import BookingPreviewSheet, { transportIcon, type StopOption, type LegGapOption } from '@/components/BookingPreviewSheet';
 import ManualTransportSheet from '@/components/ManualTransportSheet';
 import ManualAccommodationSheet, { type ManualAccommodationData } from '@/components/ManualAccommodationSheet';
+import { useNetworkStatus } from '@/context/NetworkContext';
+import { readStopCache, writeStopCache } from '@/lib/offlineCache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -71,6 +73,15 @@ interface StopDetail {
 interface DateSuggestion {
   startDate: string; // YYYY-MM-DD
   endDate: string;
+}
+
+// Shape cached to disk for offline restore
+interface StopCacheData {
+  stop: StopDetail;
+  savedBookings: SavedBookingItem[];
+  savedPlaces: SavedPlace[];
+  tripStops: StopOption[];
+  tripLegGaps: LegGapOption[];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -749,6 +760,7 @@ function LogisticsTab({
   parsingTransport,
   parsingAccommodation,
   onBookingPress,
+  isOffline,
 }: {
   savedBookings: SavedBookingItem[];
   onPickTransport: () => void;
@@ -759,6 +771,7 @@ function LogisticsTab({
   parsingTransport: boolean;
   parsingAccommodation: boolean;
   onBookingPress: (booking: SavedBookingItem) => void;
+  isOffline: boolean;
 }) {
   const transports = savedBookings.filter((b): b is SavedBookingItem & TransportBooking => b.type === 'transport');
   const accommodations = savedBookings.filter((b): b is SavedBookingItem & AccommodationBooking => b.type === 'accommodation');
@@ -792,27 +805,29 @@ function LogisticsTab({
       <Text style={[styles.logisticsSectionLabel, savedBookings.length > 0 && styles.sectionLabelSpaced]}>
         Add booking
       </Text>
-      <UploadCard
-        icon="send"
-        title="Add transport"
-        subtitle="Upload a booking confirmation"
-        loading={parsingTransport}
-        onPress={onPickTransport}
-        onDevTest={onDevFlight}
-      />
-      {__DEV__ && (
-        <Pressable style={[styles.devButton, { alignSelf: 'flex-end', marginTop: -4, marginBottom: 8 }]} onPress={onDevTrain}>
-          <Text style={styles.devButtonText}>DEV: inject train data</Text>
-        </Pressable>
-      )}
-      <UploadCard
-        icon="home"
-        title="Add accommodation"
-        subtitle="Upload a hotel or rental confirmation PDF"
-        loading={parsingAccommodation}
-        onPress={onPickAccommodation}
-        onDevTest={onDevAccommodation}
-      />
+      <View style={isOffline && { opacity: 0.4 }}>
+        <UploadCard
+          icon="send"
+          title="Add transport"
+          subtitle="Upload a booking confirmation"
+          loading={parsingTransport}
+          onPress={onPickTransport}
+          onDevTest={onDevFlight}
+        />
+        {__DEV__ && (
+          <Pressable style={[styles.devButton, { alignSelf: 'flex-end', marginTop: -4, marginBottom: 8 }]} onPress={onDevTrain}>
+            <Text style={styles.devButtonText}>DEV: inject train data</Text>
+          </Pressable>
+        )}
+        <UploadCard
+          icon="home"
+          title="Add accommodation"
+          subtitle="Upload a hotel or rental confirmation PDF"
+          loading={parsingAccommodation}
+          onPress={onPickAccommodation}
+          onDevTest={onDevAccommodation}
+        />
+      </View>
     </ScrollView>
   );
 }
@@ -1138,6 +1153,7 @@ function SavedTab({
 export default function StopDetailScreen() {
   const router = useRouter();
   const { stopId } = useLocalSearchParams<{ stopId: string }>();
+  const { isOnline, onlineRefreshTrigger, showOfflineToast } = useNetworkStatus();
   const [stop, setStop] = useState<StopDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1181,6 +1197,23 @@ export default function StopDetailScreen() {
     const fetchAll = async () => {
       if (!stopId) { setError('No stop specified.'); setLoading(false); return; }
 
+      // ── Offline fallback ─────────────────────────────────────────────────────
+      if (!isOnline) {
+        const cached = await readStopCache<StopCacheData>(stopId);
+        if (cached) {
+          setStop(cached.stop);
+          setSavedBookings(cached.savedBookings);
+          setSavedPlaces(cached.savedPlaces);
+          setTripStops(cached.tripStops);
+          setTripLegGaps(cached.tripLegGaps);
+          setSavedPlacesLoaded(true);
+        } else {
+          setError('No saved data available.');
+        }
+        setLoading(false);
+        return;
+      }
+
       const { data, error: fetchError } = await supabase
         .from('stops')
         .select('*, trips(name, start_date, end_date)')
@@ -1204,14 +1237,14 @@ export default function StopDetailScreen() {
         .eq('trip_id', stopData.trip_id)
         .order('order_index', { ascending: true });
 
+      let tripStopsData: StopOption[] = [];
       if (allStops) {
-        setTripStops(
-          (allStops as { id: string; city: string }[]).map((s) => ({
-            id: s.id,
-            city: s.city,
-            tripName: stopData.trips?.name ?? 'Trip',
-          }))
-        );
+        tripStopsData = (allStops as { id: string; city: string }[]).map((s) => ({
+          id: s.id,
+          city: s.city,
+          tripName: stopData.trips?.name ?? 'Trip',
+        }));
+        setTripStops(tripStopsData);
       }
 
       // Load legs for this trip to build leg gap options for the transport picker
@@ -1221,8 +1254,9 @@ export default function StopDetailScreen() {
         .eq('trip_id', stopData.trip_id)
         .order('order_index', { ascending: true });
 
+      let gaps: LegGapOption[] = [];
       if (tripLegs) {
-        const gaps: LegGapOption[] = (tripLegs as any[])
+        gaps = (tripLegs as any[])
           .filter((l) => l.from_stop?.city && l.to_stop?.city && l.to_stop_id && l.from_stop_id)
           .map((l) => ({
             id: l.to_stop_id,
@@ -1235,16 +1269,25 @@ export default function StopDetailScreen() {
         setTripLegGaps(gaps);
       }
 
-      await loadSavedBookings(stopData);
-      await loadSavedPlaces(stopData.id);
+      const bookingsData = await loadSavedBookings(stopData);
+      const placesData = await loadSavedPlaces(stopData.id);
+
+      // Write full stop state to cache for offline use
+      writeStopCache(stopId, {
+        stop: stopData,
+        savedBookings: bookingsData,
+        savedPlaces: placesData,
+        tripStops: tripStopsData,
+        tripLegGaps: gaps,
+      } satisfies StopCacheData).catch(() => {});
     };
     fetchAll();
-  }, [stopId]);
+  }, [stopId, isOnline, onlineRefreshTrigger]);
 
-  async function loadSavedBookings(stopData: StopDetail) {
+  async function loadSavedBookings(stopData: StopDetail): Promise<SavedBookingItem[]> {
     const { data: { session } } = await supabase.auth.getSession();
     const userId = session?.user?.id;
-    if (!userId) return;
+    if (!userId) return [];
 
     const items: SavedBookingItem[] = [];
 
@@ -1404,26 +1447,29 @@ export default function StopDetailScreen() {
     }
 
     setSavedBookings(items);
+    return items;
   }
 
-  async function loadSavedPlaces(sid: string) {
+  async function loadSavedPlaces(sid: string): Promise<SavedPlace[]> {
     try {
       const places = await fetchPlacesForStop(sid);
       setSavedPlaces(places);
+      setSavedPlacesLoaded(true);
+      return places;
     } catch (err: any) {
       console.warn('[saved places] fetch error:', err?.message);
-    } finally {
       setSavedPlacesLoaded(true);
+      return [];
     }
   }
 
-  // Reload saved bookings and places on screen focus
+  // Reload saved bookings and places on screen focus (skipped when offline)
   useFocusEffect(
     useCallback(() => {
-      if (!stop) return;
+      if (!stop || !isOnline) return;
       loadSavedBookings(stop);
       loadSavedPlaces(stop.id);
-    }, [stop]),
+    }, [stop, isOnline]),
   );
 
   // ── Stop management actions ───────────────────────────────────────────────
@@ -1923,7 +1969,14 @@ export default function StopDetailScreen() {
               <Text style={styles.headerMeta}>{headerMeta}</Text>
             ) : null}
           </View>
-          <Pressable style={styles.headerAction} hitSlop={8} onPress={() => setMenuVisible(true)}>
+          <Pressable
+            style={[styles.headerAction, !isOnline && { opacity: 0.4 }]}
+            hitSlop={8}
+            onPress={() => {
+              if (!isOnline) { showOfflineToast(); return; }
+              setMenuVisible(true);
+            }}
+          >
             <Feather name="more-horizontal" size={22} color={colors.text} />
           </Pressable>
         </View>
@@ -1943,14 +1996,21 @@ export default function StopDetailScreen() {
       {activeTab === 'Logistics' && (
         <LogisticsTab
           savedBookings={savedBookings}
-          onPickTransport={() => setSourcePickerVisible(true)}
-          onPickAccommodation={() => setAccommodationSourcePickerVisible(true)}
+          onPickTransport={() => {
+            if (!isOnline) { showOfflineToast(); return; }
+            setSourcePickerVisible(true);
+          }}
+          onPickAccommodation={() => {
+            if (!isOnline) { showOfflineToast(); return; }
+            setAccommodationSourcePickerVisible(true);
+          }}
           onDevFlight={() => { setParsedBooking(DEV_FLIGHT); setPreviewVisible(true); }}
           onDevTrain={() => { setParsedBooking(DEV_TRAIN); setPreviewVisible(true); }}
           onDevAccommodation={() => { setParsedBooking(DEV_ACCOMMODATION); setPreviewVisible(true); }}
           parsingTransport={parsingTransport}
           parsingAccommodation={parsingAccommodation}
           onBookingPress={handleBookingPress}
+          isOffline={!isOnline}
         />
       )}
       {activeTab === 'Days' && <PlaceholderTab label="Days" />}
