@@ -25,7 +25,7 @@ interface TripSummary {
   dateRange: string;
   stopCount: number;
   chips: string[];
-  memberCount: number;
+  collaboratorCount: number;
 }
 
 interface DbTrip {
@@ -65,7 +65,7 @@ function toTripSummary(t: DbTrip): TripSummary {
     dateRange: formatDateRange(t.start_date, t.end_date),
     stopCount: t.stops.length,
     chips: t.stops.map((s) => s.city).filter(Boolean),
-    memberCount: t.trip_members.length,
+    collaboratorCount: t.trip_members.length,
   };
 }
 
@@ -104,7 +104,7 @@ function TripCard({ trip, onPress }: { trip: TripSummary; onPress?: () => void }
         <Text style={styles.cardStops}>
           {trip.stopCount} {trip.stopCount === 1 ? 'stop' : 'stops'}
         </Text>
-        {trip.memberCount > 0 && (
+        {trip.collaboratorCount > 0 && (
           <>
             <Text style={styles.cardDot}>·</Text>
             <Feather name="users" size={13} color={colors.textMuted} />

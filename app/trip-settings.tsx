@@ -146,19 +146,31 @@ export default function TripSettingsScreen() {
     setOwnerId(trip.owner_id);
 
     // Fetch trip_members
-    const { data: members } = await supabase
+    const { data: members, error: membersError } = await supabase
       .from('trip_members')
       .select('user_id')
       .eq('trip_id', tripId);
+
+    if (membersError) {
+      setError('Could not load collaborators.');
+      setLoading(false);
+      return;
+    }
 
     // Collect all user IDs (owner + members) and fetch their profiles
     const memberIds = (members ?? []).map((m: { user_id: string }) => m.user_id);
     const allUserIds = [trip.owner_id, ...memberIds];
 
-    const { data: profiles } = await supabase
+    const { data: profiles, error: profilesError } = await supabase
       .from('profiles')
       .select('id, email, display_name')
       .in('id', allUserIds);
+
+    if (profilesError) {
+      setError('Could not load collaborator profiles.');
+      setLoading(false);
+      return;
+    }
 
     const profileMap = new Map<string, Profile>(
       (profiles ?? []).map((p: Profile) => [p.id, p])
@@ -400,8 +412,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12,
   },
   backButton: { width: 36, alignItems: 'flex-start' },
-  navTitle: { fontFamily: fonts.bodyBold, fontSize: 17, color: colors.text },
-  navSpacer: { flex: 1 },
+  navTitle: { flex: 1, fontFamily: fonts.bodyBold, fontSize: 17, color: colors.text, textAlign: 'center' },
+  navSpacer: { width: 36 },
 
   scrollContent: { padding: 20, paddingBottom: 60 },
 
