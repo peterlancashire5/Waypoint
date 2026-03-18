@@ -15,6 +15,8 @@ import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
 import QuickCaptureFAB from '@/components/QuickCaptureFAB';
+import { useNetworkStatus } from '@/context/NetworkContext';
+import { readTripListCache, writeTripListCache } from '@/lib/offlineCache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -149,10 +151,23 @@ export default function TripsScreen() {
   const [trips, setTrips] = useState<TripSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const { isOnline, onlineRefreshTrigger, showOfflineToast } = useNetworkStatus();
 
   const fetchTrips = useCallback(async () => {
     setLoading(true);
     setError(null);
+
+    // ── Offline fallback ──────────────────────────────────────────────────────
+    if (!isOnline) {
+      const cached = await readTripListCache<TripSummary[]>();
+      if (cached) {
+        setTrips(cached);
+      } else {
+        setError('No saved data available.');
+      }
+      setLoading(false);
+      return;
+    }
 
     const { data: { session } } = await supabase.auth.getSession();
     const user = session?.user;
@@ -196,9 +211,13 @@ export default function TripsScreen() {
       ...sharedData.filter((t) => !ownedIds.has(t.id)),
     ];
 
-    setTrips(allTrips.map(toTripSummary));
+    const summaries = allTrips.map(toTripSummary);
+    setTrips(summaries);
     setLoading(false);
-  }, []);
+
+    // Write to cache in background (fire and forget)
+    writeTripListCache(summaries).catch(() => {});
+  }, [isOnline, onlineRefreshTrigger]);
 
   useFocusEffect(
     useCallback(() => {
@@ -215,7 +234,14 @@ export default function TripsScreen() {
       <SafeAreaView edges={['top']} style={styles.safeTop}>
         <View style={styles.header}>
           <Text style={styles.headerTitle}>My Trips</Text>
-          <Pressable style={styles.addButton} hitSlop={8} onPress={() => router.push('/create-trip')}>
+          <Pressable
+            style={[styles.addButton, !isOnline && { opacity: 0.4 }]}
+            hitSlop={8}
+            onPress={() => {
+              if (!isOnline) { showOfflineToast(); return; }
+              router.push('/create-trip');
+            }}
+          >
             <Feather name="plus" size={22} color={colors.primary} />
           </Pressable>
         </View>
