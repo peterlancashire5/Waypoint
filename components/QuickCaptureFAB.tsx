@@ -39,6 +39,7 @@ import {
 } from '@/lib/journeyUtils';
 import BookingPreviewSheet, { type StopOption, type LegGapOption } from '@/components/BookingPreviewSheet';
 import Toast from '@/components/ui/Toast';
+import { useNetworkStatus } from '@/context/NetworkContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -457,6 +458,7 @@ const parseStyles = StyleSheet.create({
 // ─── Main FAB component ───────────────────────────────────────────────────────
 
 export default function QuickCaptureFAB() {
+  const { isOnline, showOfflineToast } = useNetworkStatus();
   const [sheetVisible, setSheetVisible] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [parsedBooking, setParsedBooking] = useState<ParsedBooking | null>(null);
@@ -603,6 +605,7 @@ export default function QuickCaptureFAB() {
   }
 
   function handleFABPress() {
+    if (!isOnline) { showOfflineToast(); return; }
     setSheetVisible(true);
   }
 
@@ -1003,7 +1006,7 @@ export default function QuickCaptureFAB() {
     <>
       {/* FAB button */}
       <Pressable
-        style={({ pressed }) => [styles.fab, pressed && styles.fabPressed]}
+        style={({ pressed }) => [styles.fab, !isOnline && { opacity: 0.5 }, pressed && styles.fabPressed]}
         onPress={handleFABPress}
         disabled={parsing}
       >

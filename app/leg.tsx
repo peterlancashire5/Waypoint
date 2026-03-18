@@ -181,7 +181,7 @@ function BookingCard({ booking, type }: { booking: LegBooking; type: TransportTy
 export default function LegScreen() {
   const router = useRouter();
   const { legId } = useLocalSearchParams<{ legId: string }>();
-  const { isOnline } = useNetworkStatus();
+  const { isOnline, onlineRefreshTrigger } = useNetworkStatus();
   const [leg, setLeg] = useState<LegDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -232,7 +232,7 @@ export default function LegScreen() {
     };
 
     fetchLeg();
-  }, [legId, isOnline]);
+  }, [legId, isOnline, onlineRefreshTrigger]);
 
   // ── Loading ──────────────────────────────────────────────────────────────
   if (loading) {

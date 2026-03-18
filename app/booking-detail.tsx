@@ -1068,7 +1068,7 @@ export default function BookingDetailScreen() {
     source: 'accommodation' | 'leg_bookings' | 'saved_items';
   }>();
 
-  const { isOnline, showOfflineToast } = useNetworkStatus();
+  const { isOnline, onlineRefreshTrigger, showOfflineToast } = useNetworkStatus();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1225,12 +1225,13 @@ export default function BookingDetailScreen() {
       setLoading(false);
     };
     load();
-  }, [id, type, source, isOnline]);
+  }, [id, type, source, isOnline, onlineRefreshTrigger]);
 
   // ── Save a field ────────────────────────────────────────────────────────────
 
   async function saveAccommodationField(field: keyof AccommodationRecord, value: string) {
     if (!accommodation) return;
+    if (!isOnline) { showOfflineToast(); return; }
     const storedValue = value === '' ? null : value;
     const { error: updateErr } = await supabase
       .from('accommodation')
@@ -1248,6 +1249,7 @@ export default function BookingDetailScreen() {
     field: 'operator' | 'reference' | 'seat' | 'confirmation_ref',
     value: string,
   ) {
+    if (!isOnline) { showOfflineToast(); return; }
     const storedValue = value === '' ? null : value;
     const { error: updateErr } = await supabase
       .from('leg_bookings')
@@ -1269,6 +1271,7 @@ export default function BookingDetailScreen() {
   }
 
   async function saveLegExtraField(lbId: string, field: string, value: string) {
+    if (!isOnline) { showOfflineToast(); return; }
     const lb = journeyDetail?.legBookings.find((l) => l.id === lbId);
     if (!lb) return;
     const storedValue = value === '' ? null : value;
@@ -1294,6 +1297,7 @@ export default function BookingDetailScreen() {
 
   async function saveSavedItemTransportField(field: SavedItemEditableField, value: string) {
     if (!savedItemTransport) return;
+    if (!isOnline) { showOfflineToast(); return; }
     const storedValue = value === '' ? null : value;
     const updated = { ...savedItemTransport, [field]: storedValue };
     const note = JSON.stringify({
