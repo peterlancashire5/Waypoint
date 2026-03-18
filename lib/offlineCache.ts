@@ -8,6 +8,7 @@
 // Trip list:   waypoint_cache_trip_list
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { cleanupDocumentCache } from '@/lib/documentCache';
 
 const TRIP_LIST_KEY = 'waypoint_cache_trip_list';
 const TRIP_KEY = (id: string) => `waypoint_cache_trip_${id}`;
@@ -140,6 +141,8 @@ export async function runCacheCleanup(): Promise<string[]> {
 
     await AsyncStorage.multiRemove(keysToRemove);
     await AsyncStorage.setItem(META_KEY, JSON.stringify(meta));
+
+    cleanupDocumentCache(expiredTripIds).catch(() => {});
 
     return expiredTripIds;
   } catch (e) {

@@ -36,6 +36,7 @@ import {
   writeTripCache,
   updateLastOpenedAt,
 } from '@/lib/offlineCache';
+import { downloadDocumentsForTrip } from '@/lib/documentCache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -660,7 +661,7 @@ export default function TripDetailScreen() {
       stopIds,
     ).catch(() => {});
 
-    // TODO (Task 12): downloadDocumentsForTrip(tripId, supabase).catch(() => {});
+    downloadDocumentsForTrip(tripId, supabase).catch(() => {});
   }, [tripId, isOnline, onlineRefreshTrigger]);
 
   useFocusEffect(
