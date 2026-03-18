@@ -16,6 +16,7 @@ import {
 } from '@expo-google-fonts/lato';
 import { type Session } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
+import { NetworkProvider } from '@/context/NetworkContext';
 
 // Keep the system splash screen visible until fonts + auth are ready.
 SplashScreen.preventAutoHideAsync();
@@ -75,15 +76,17 @@ export default function RootLayout() {
   if ((!fontsLoaded && !fontError) || session === undefined) return null;
 
   return (
-    <Stack screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="leg" options={{ presentation: 'modal', headerShown: false }} />
-      <Stack.Screen name="create-trip" options={{ presentation: 'modal', headerShown: false }} />
-      <Stack.Screen name="stop-detail" options={{ headerShown: false }} />
-      <Stack.Screen name="trip-detail" options={{ headerShown: false }} />
-      <Stack.Screen name="settings" options={{ headerShown: false }} />
-      <Stack.Screen name="booking-detail" options={{ headerShown: false }} />
-      <Stack.Screen name="place-detail" options={{ headerShown: false }} />
-      <Stack.Screen name="trip-settings" options={{ headerShown: false }} />
-    </Stack>
+    <NetworkProvider>
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="leg" options={{ presentation: 'modal', headerShown: false }} />
+        <Stack.Screen name="create-trip" options={{ presentation: 'modal', headerShown: false }} />
+        <Stack.Screen name="stop-detail" options={{ headerShown: false }} />
+        <Stack.Screen name="trip-detail" options={{ headerShown: false }} />
+        <Stack.Screen name="settings" options={{ headerShown: false }} />
+        <Stack.Screen name="booking-detail" options={{ headerShown: false }} />
+        <Stack.Screen name="place-detail" options={{ headerShown: false }} />
+        <Stack.Screen name="trip-settings" options={{ headerShown: false }} />
+      </Stack>
+    </NetworkProvider>
   );
 }

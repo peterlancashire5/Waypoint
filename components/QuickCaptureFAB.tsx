@@ -38,6 +38,7 @@ import {
   buildExtraData,
 } from '@/lib/journeyUtils';
 import BookingPreviewSheet, { type StopOption, type LegGapOption } from '@/components/BookingPreviewSheet';
+import Toast from '@/components/ui/Toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -422,63 +423,6 @@ const sheetStyles = StyleSheet.create({
   rowText: { flex: 1 },
   rowLabel: { fontFamily: fonts.bodyBold, fontSize: 16, color: colors.text, marginBottom: 2 },
   rowSub: { fontFamily: fonts.body, fontSize: 13, color: colors.textMuted },
-});
-
-// ─── Toast ────────────────────────────────────────────────────────────────────
-
-function Toast({
-  message,
-  onUndo,
-  onDismiss,
-}: {
-  message: string;
-  onUndo: () => void;
-  onDismiss: () => void;
-}) {
-  const opacity = useRef(new Animated.Value(0)).current;
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    Animated.timing(opacity, { toValue: 1, duration: 220, useNativeDriver: true }).start();
-
-    timerRef.current = setTimeout(() => {
-      Animated.timing(opacity, { toValue: 0, duration: 300, useNativeDriver: true }).start(
-        () => onDismiss()
-      );
-    }, 4000);
-
-    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, []);
-
-  function handleUndo() {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    Animated.timing(opacity, { toValue: 0, duration: 200, useNativeDriver: true }).start(
-      () => onDismiss()
-    );
-    onUndo();
-  }
-
-  return (
-    <Animated.View style={[toastStyles.toast, { opacity }]}>
-      <Text style={toastStyles.message} numberOfLines={1}>{message}</Text>
-      <Pressable onPress={handleUndo} hitSlop={8}>
-        <Text style={toastStyles.undo}>Undo</Text>
-      </Pressable>
-    </Animated.View>
-  );
-}
-
-const toastStyles = StyleSheet.create({
-  toast: {
-    position: 'absolute', bottom: 104, left: 16, right: 16,
-    backgroundColor: colors.text,
-    borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.18, shadowRadius: 12, elevation: 8,
-  },
-  message: { fontFamily: fonts.body, fontSize: 14, color: colors.white, flex: 1 },
-  undo: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.accent, marginLeft: 12 },
 });
 
 // ─── Parsing overlay ──────────────────────────────────────────────────────────
@@ -1093,7 +1037,9 @@ export default function QuickCaptureFAB() {
       {toastMessage && (
         <Toast
           message={toastMessage}
-          onUndo={handleUndo}
+          position="bottom"
+          duration={4000}
+          action={lastSaved ? { label: 'Undo', onPress: handleUndo } : undefined}
           onDismiss={() => { setToastMessage(null); setLastSaved(null); }}
         />
       )}
