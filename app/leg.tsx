@@ -12,9 +12,11 @@ import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Feather } from '@expo/vector-icons';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
 import { supabase } from '@/lib/supabase';
+import { useNetworkStatus } from '@/context/NetworkContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -179,6 +181,7 @@ function BookingCard({ booking, type }: { booking: LegBooking; type: TransportTy
 export default function LegScreen() {
   const router = useRouter();
   const { legId } = useLocalSearchParams<{ legId: string }>();
+  const { isOnline } = useNetworkStatus();
   const [leg, setLeg] = useState<LegDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -187,6 +190,23 @@ export default function LegScreen() {
     const fetchLeg = async () => {
       if (!legId) {
         setError('No leg specified.');
+        setLoading(false);
+        return;
+      }
+
+      // Offline fallback — restore from per-record cache
+      if (!isOnline) {
+        try {
+          const raw = await AsyncStorage.getItem(`waypoint_cache_leg_${legId}`);
+          if (raw) {
+            const cached = JSON.parse(raw);
+            if (cached.leg) setLeg(cached.leg);
+          } else {
+            setError('No saved data available.');
+          }
+        } catch {
+          setError('No saved data available.');
+        }
         setLoading(false);
         return;
       }
@@ -200,13 +220,19 @@ export default function LegScreen() {
       if (fetchError || !data) {
         setError('Could not load this leg.');
       } else {
-        setLeg(data as LegDetail);
+        const legData = data as LegDetail;
+        setLeg(legData);
+        // Cache for offline — fire and forget
+        AsyncStorage.setItem(
+          `waypoint_cache_leg_${legId}`,
+          JSON.stringify({ leg: legData }),
+        ).catch(() => {});
       }
       setLoading(false);
     };
 
     fetchLeg();
-  }, [legId]);
+  }, [legId, isOnline]);
 
   // ── Loading ──────────────────────────────────────────────────────────────
   if (loading) {
