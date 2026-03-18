@@ -229,6 +229,62 @@ export default function TripSettingsScreen() {
     );
   }
 
+  // ── Leave trip (non-owner only) ────────────────────────────────────────────
+
+  function handleLeaveTrip() {
+    Alert.alert(
+      'Leave this trip?',
+      "You'll lose access to this trip and its itinerary.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Leave',
+          style: 'destructive',
+          onPress: async () => {
+            if (!currentUserId) return;
+            const { error: leaveError } = await supabase
+              .from('trip_members')
+              .delete()
+              .eq('trip_id', tripId)
+              .eq('user_id', currentUserId);
+            if (leaveError) {
+              Alert.alert('Error', 'Could not leave trip. Please try again.');
+              return;
+            }
+            router.replace('/(main)/trips');
+          },
+        },
+      ]
+    );
+  }
+
+  // ── Delete trip (owner only) ───────────────────────────────────────────────
+
+  function handleDeleteTrip() {
+    Alert.alert(
+      'Delete this trip?',
+      'This will permanently delete the trip for all collaborators.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const { error: deleteError } = await supabase
+              .from('trips')
+              .delete()
+              .eq('id', tripId);
+            if (deleteError) {
+              Alert.alert('Error', 'Could not delete trip. Please try again.');
+              return;
+            }
+            router.replace('/(main)/trips');
+          },
+        },
+      ]
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
 
   if (loading) {
@@ -313,7 +369,20 @@ export default function TripSettingsScreen() {
             <Text style={styles.inviteButtonTextDisabled}>Invite someone</Text>
           </Pressable>
         </View>
-        {/* Leave/Delete section — added in Task 6 */}
+        {/* ── Danger zone ── */}
+        <View style={styles.dangerSection}>
+          {isOwner ? (
+            <Pressable style={styles.dangerButton} onPress={handleDeleteTrip}>
+              <Feather name="trash-2" size={16} color={colors.error} />
+              <Text style={styles.dangerButtonText}>Delete trip</Text>
+            </Pressable>
+          ) : (
+            <Pressable style={styles.dangerButton} onPress={handleLeaveTrip}>
+              <Feather name="log-out" size={16} color={colors.error} />
+              <Text style={styles.dangerButtonText}>Leave trip</Text>
+            </Pressable>
+          )}
+        </View>
       </ScrollView>
     </View>
   );
@@ -370,4 +439,12 @@ const styles = StyleSheet.create({
   },
   inviteButtonDisabled: { borderColor: colors.border },
   inviteButtonTextDisabled: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.textMuted },
+
+  dangerSection: { marginTop: 8 },
+  dangerButton: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, paddingVertical: 14, borderRadius: 14,
+    borderWidth: 1, borderColor: colors.error,
+  },
+  dangerButtonText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.error },
 });
