@@ -259,7 +259,10 @@ export default function TripsScreen() {
           </Pressable>
         </View>
       ) : trips.length === 0 ? (
-        <EmptyState onPress={() => router.push('/create-trip')} />
+        <EmptyState onPress={() => {
+          if (!isOnline) { showOfflineToast(); return; }
+          router.push('/create-trip');
+        }} />
       ) : (
         <ScrollView
           style={styles.flex1}
