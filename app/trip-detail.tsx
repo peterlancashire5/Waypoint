@@ -579,19 +579,23 @@ export default function TripDetailScreen() {
     setItinerary(buildItinerary(sortedStops, sortedLegs, allTransport));
 
     // Fetch collaborators for avatar stack (non-blocking)
+    // trip_members stores only non-owner members; include owner via raw.owner_id
     const { data: memberRows } = await supabase
       .from('trip_members')
       .select('user_id')
       .eq('trip_id', tripId!);
 
     if (memberRows && memberRows.length > 0) {
+      // Shared trip — show owner + all members in the avatar stack
       const memberIds = memberRows.map((m: { user_id: string }) => m.user_id);
+      const allUserIds = [raw.owner_id, ...memberIds];
       const { data: profileRows } = await supabase
         .from('profiles')
         .select('id, email')
-        .in('id', memberIds);
+        .in('id', allUserIds);
       setCollaboratorProfiles((profileRows ?? []) as CollaboratorProfile[]);
     } else {
+      // Solo trip — no avatar stack
       setCollaboratorProfiles([]);
     }
 
