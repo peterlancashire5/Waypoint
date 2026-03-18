@@ -13,6 +13,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
+import { File as FSFile } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
@@ -46,6 +47,7 @@ import { useNetworkStatus } from '@/context/NetworkContext';
 interface StopWithDates extends StopOption {
   start_date: string | null;
   end_date: string | null;
+  tripId: string;
 }
 
 interface SavedRecord {
@@ -470,6 +472,8 @@ export default function QuickCaptureFAB() {
   const [stopsLoaded, setStopsLoaded] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [lastSaved, setLastSaved] = useState<SavedRecord | null>(null);
+  const [sourceFileUri, setSourceFileUri] = useState<string | null>(null);
+  const [sourceMediaType, setSourceMediaType] = useState<string | null>(null);
 
   // ── Load stops + leg gaps on mount ──────────────────────────────────────
   //
@@ -526,6 +530,7 @@ export default function QuickCaptureFAB() {
         tripName: tripNameMap.get(s.trip_id) ?? 'Trip',
         start_date: s.start_date,
         end_date: s.end_date,
+        tripId: s.trip_id,
       });
       const bucket = stopsByTrip.get(s.trip_id) ?? [];
       bucket.push({ id: s.id, city: s.city, order_index: s.order_index ?? 0 });
@@ -622,6 +627,8 @@ export default function QuickCaptureFAB() {
 
       const asset = result.assets[0];
       const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
+      setSourceFileUri(asset.uri);
+      setSourceMediaType(rawMediaType);
       const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
@@ -650,6 +657,8 @@ export default function QuickCaptureFAB() {
 
       const asset = result.assets[0];
       const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      setSourceFileUri(asset.uri);
+      setSourceMediaType(rawMediaType);
       const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
@@ -678,6 +687,8 @@ export default function QuickCaptureFAB() {
 
       const asset = result.assets[0];
       const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
+      setSourceFileUri(asset.uri);
+      setSourceMediaType(rawMediaType);
       const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
@@ -763,7 +774,14 @@ export default function QuickCaptureFAB() {
         }
 
         const record = await saveBooking(booking, stop.id, session.user.id);
-        if (record) setLastSaved(record);
+        if (record) {
+          setLastSaved(record);
+          if (sourceFileUri && sourceMediaType) {
+            uploadSourceDocument(record, sourceFileUri, sourceMediaType, session.user.id, stop.tripId).catch(() => {});
+            setSourceFileUri(null);
+            setSourceMediaType(null);
+          }
+        }
         setToastMessage(`Saved to ${stop.city}`);
       } catch {
         setParsedBooking(booking);
@@ -871,7 +889,13 @@ export default function QuickCaptureFAB() {
         },
       ]);
 
-      setLastSaved({ table: 'journeys', id: journeyId });
+      const savedRecord: SavedRecord = { table: 'journeys', id: journeyId };
+      setLastSaved(savedRecord);
+      if (sourceFileUri && sourceMediaType) {
+        uploadSourceDocument(savedRecord, sourceFileUri, sourceMediaType, session.user.id, gap.tripId).catch(() => {});
+        setSourceFileUri(null);
+        setSourceMediaType(null);
+      }
       setToastMessage(`Started journey ${gap.fromCity} → ${gap.toCity}`);
     } catch (err: any) {
       Alert.alert('Could not save', err?.message ?? 'Please try again.');
@@ -942,11 +966,17 @@ export default function QuickCaptureFAB() {
         ? `Journey complete! ${journey.originCity} → ${journey.destinationCity}`
         : `Leg added to ${journey.originCity} → ${journey.destinationCity} journey`;
 
-      setLastSaved({
+      const savedRecord: SavedRecord = {
         table: 'journey_leg',
         id: lbId,
         meta: { journeyId: journey.id, wasComplete: false },
-      });
+      };
+      setLastSaved(savedRecord);
+      if (sourceFileUri && sourceMediaType) {
+        uploadSourceDocument(savedRecord, sourceFileUri, sourceMediaType, session.user.id, journey.tripId).catch(() => {});
+        setSourceFileUri(null);
+        setSourceMediaType(null);
+      }
       setToastMessage(toastText);
     } catch (err: any) {
       Alert.alert('Could not save', err?.message ?? 'Please try again.');
@@ -970,9 +1000,15 @@ export default function QuickCaptureFAB() {
       // Only transport/connection bookings can match a leg gap — accommodation always goes to a stop
       const isTransportBooking = booking.type === 'transport' || booking.type === 'connection';
       const savedGap = isTransportBooking ? allLegGaps.find((g) => g.id === stopId) : null;
-      await saveBooking(booking, stopId, session.user.id, savedGap?.tripId ?? null);
+      const record = await saveBooking(booking, stopId, session.user.id, savedGap?.tripId ?? null);
       setPreviewVisible(false);
       setParsedBooking(null);
+      if (record && sourceFileUri && sourceMediaType) {
+        const tripId = savedGap?.tripId ?? allStops.find((s) => s.id === stopId)?.tripId ?? null;
+        uploadSourceDocument(record, sourceFileUri, sourceMediaType, session.user.id, tripId).catch(() => {});
+        setSourceFileUri(null);
+        setSourceMediaType(null);
+      }
       const savedStop = allStops.find((s) => s.id === stopId);
       if (savedGap) setToastMessage(`Saved ${savedGap.fromCity} → ${savedGap.toCity}`);
       else if (savedStop) setToastMessage(`Saved to ${savedStop.city}`);
@@ -980,6 +1016,76 @@ export default function QuickCaptureFAB() {
       Alert.alert('Could not save booking', err?.message ?? 'Please try again.');
     } finally {
       setSaving(false);
+    }
+  }
+
+  // ── Background document upload ────────────────────────────────────────────
+  // Fire-and-forget — upload failures are silent and never affect the booking save flow.
+
+  async function uploadSourceDocument(
+    record: SavedRecord,
+    fileUri: string,
+    mimeType: string,
+    userId: string,
+    tripId: string | null,
+  ): Promise<void> {
+    try {
+      // Map mimeType → file_type (DB enum) and storage extension
+      const fileTypeMap: Record<string, 'pdf' | 'jpg' | 'png'> = {
+        'application/pdf': 'pdf',
+        'image/jpeg': 'jpg',
+        'image/png': 'png',
+      };
+      const fileType = fileTypeMap[mimeType] ?? 'jpg';
+      const storageExt = fileType === 'jpg' ? 'jpeg' : fileType;
+
+      // Read file as ArrayBuffer using the new expo-file-system File API
+      const fsFile = new FSFile(fileUri);
+      const arrayBuffer = await fsFile.arrayBuffer();
+
+      // Upload to Storage: documents/{userId}/{uuid}.{ext}
+      const storagePath = `${userId}/${crypto.randomUUID()}.${storageExt}`;
+      const { error: uploadError } = await supabase.storage
+        .from('documents')
+        .upload(storagePath, arrayBuffer, {
+          contentType: mimeType,
+          upsert: false,
+        });
+      if (uploadError) return;
+
+      // Insert document_files row
+      const originalFilename = `document.${fileType === 'jpg' ? 'jpg' : fileType}`;
+      const { data: docFile, error: docError } = await supabase
+        .from('document_files')
+        .insert({
+          user_id: userId,
+          trip_id: tripId,
+          storage_path: storagePath,
+          file_type: fileType,
+          original_filename: originalFilename,
+        })
+        .select('id')
+        .single();
+      if (docError || !docFile) return;
+
+      // Insert document_links row (only for linkable types)
+      const linkableTypeMap: Partial<Record<SavedRecord['table'], string>> = {
+        accommodation: 'accommodation',
+        leg_bookings: 'leg_booking',
+        journey_leg: 'leg_booking',
+        saved_items: 'saved_place',
+        // journeys: skip (no direct linkable_type for multi-leg journeys)
+      };
+      const linkableType = linkableTypeMap[record.table];
+      if (linkableType) {
+        await supabase.from('document_links').insert({
+          document_id: (docFile as any).id,
+          linkable_type: linkableType,
+          linkable_id: record.id,
+        });
+      }
+    } catch (e) {
+      console.warn('[QuickCaptureFAB] uploadSourceDocument failed:', e);
     }
   }
 
@@ -1033,7 +1139,7 @@ export default function QuickCaptureFAB() {
         legGaps={allLegGaps}
         saving={saving}
         onSave={handleManualSave}
-        onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); }}
+        onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); setSourceFileUri(null); setSourceMediaType(null); }}
       />
 
       {/* Toast */}
