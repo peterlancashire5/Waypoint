@@ -501,8 +501,20 @@ export default function TripDetailScreen() {
 
     const stopIds = sortedStops.map((s) => s.id);
     if (stopIds.length === 0 || !userId) {
-      setItinerary(buildItinerary(sortedStops, sortedLegs, []));
+      const emptyItinerary = buildItinerary(sortedStops, sortedLegs, []);
+      setItinerary(emptyItinerary);
+      updateLastOpenedAt(tripId).catch(() => {});
       setLoading(false);
+      writeTripCache(
+        tripId,
+        {
+          trip: { ...raw, stops: sortedStops, legs: sortedLegs },
+          itinerary: emptyItinerary,
+          stopOptions: sortedStops.map((s) => ({ id: s.id, city: s.city, tripName: raw.name ?? '' })),
+          collaboratorProfiles: [],
+        } satisfies TripCacheData,
+        stopIds,
+      ).catch(() => {});
       return;
     }
 
@@ -1218,7 +1230,7 @@ export default function TripDetailScreen() {
           data={editStops}
           keyExtractor={(item) => item.tempId}
           onDragEnd={({ data }) => {
-            if (!isOnline) return;
+            if (!isOnline) { showOfflineToast(); return; }
             setEditStops(data);
           }}
           contentContainerStyle={styles.scrollContent}
@@ -1268,7 +1280,7 @@ export default function TripDetailScreen() {
         <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
           <View style={styles.menuPopup}>
             <Pressable
-              style={styles.menuItem}
+              style={[styles.menuItem, !isOnline && { opacity: 0.4 }]}
               onPress={() => {
                 setMenuVisible(false);
                 if (!isOnline) { showOfflineToast(); return; }
