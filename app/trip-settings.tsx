@@ -35,6 +35,71 @@ function getInitials(email: string): string {
   return email.slice(0, 2).toUpperCase();
 }
 
+// ─── CollaboratorRow ─────────────────────────────────────────────────────────
+
+interface CollaboratorRowProps {
+  collab: Collaborator;
+  isCurrentUserOwner: boolean;
+  currentUserId: string | null;
+  onRemove: (collab: Collaborator) => void;
+}
+
+function CollaboratorRow({ collab, isCurrentUserOwner, currentUserId, onRemove }: CollaboratorRowProps) {
+  const showRemove = isCurrentUserOwner && !collab.isOwner;
+
+  return (
+    <View style={rowStyles.row}>
+      <View style={rowStyles.avatar}>
+        <Text style={rowStyles.avatarText}>{getInitials(collab.email)}</Text>
+      </View>
+      <View style={rowStyles.info}>
+        <Text style={rowStyles.email} numberOfLines={1}>{collab.email}</Text>
+        {collab.isOwner && (
+          <View style={rowStyles.badge}>
+            <Text style={rowStyles.badgeText}>Creator</Text>
+          </View>
+        )}
+      </View>
+      {showRemove && (
+        <Pressable
+          style={rowStyles.removeButton}
+          onPress={() => onRemove(collab)}
+          hitSlop={8}
+        >
+          <Feather name="trash-2" size={16} color={colors.error} />
+        </Pressable>
+      )}
+    </View>
+  );
+}
+
+const rowStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: colors.border,
+  },
+  avatar: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: colors.primary,
+    alignItems: 'center', justifyContent: 'center',
+    marginRight: 12, flexShrink: 0,
+  },
+  avatarText: { fontFamily: fonts.bodyBold, fontSize: 13, color: '#FFFFFF' },
+  info: { flex: 1, gap: 3 },
+  email: { fontFamily: fonts.body, fontSize: 14, color: colors.text },
+  badge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#EBF3F6', borderRadius: 4,
+    paddingHorizontal: 6, paddingVertical: 2,
+  },
+  badgeText: {
+    fontFamily: fonts.bodyBold, fontSize: 10,
+    color: colors.primary, letterSpacing: 0.5, textTransform: 'uppercase',
+  },
+  removeButton: { padding: 4 },
+});
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function TripSettingsScreen() {
@@ -136,6 +201,35 @@ export default function TripSettingsScreen() {
     setNameSaving(false);
   }
 
+  // ── Remove collaborator ─────────────────────────────────────────────────────
+
+  function handleRemoveCollaborator(collab: Collaborator) {
+    Alert.alert(
+      'Remove collaborator',
+      `Remove ${collab.email}? They'll lose access to this trip.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            const { error: removeError } = await supabase
+              .from('trip_members')
+              .delete()
+              .eq('trip_id', tripId)
+              .eq('user_id', collab.id);
+            if (removeError) {
+              Alert.alert('Error', 'Could not remove collaborator. Please try again.');
+              return;
+            }
+            // Refresh collaborator list
+            setCollaborators((prev) => prev.filter((c) => c.id !== collab.id));
+          },
+        },
+      ]
+    );
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
 
   if (loading) {
@@ -198,7 +292,29 @@ export default function TripSettingsScreen() {
           </View>
         </View>
 
-        {/* Collaborators section — added in Task 5 */}
+        {/* ── Collaborators section ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>
+            COLLABORATORS ({memberCount})
+          </Text>
+          {collaborators.map((collab) => (
+            <CollaboratorRow
+              key={collab.id}
+              collab={collab}
+              isCurrentUserOwner={isOwner}
+              currentUserId={currentUserId}
+              onRemove={handleRemoveCollaborator}
+            />
+          ))}
+          {/* TODO: Phase 3 — wire up invite link generation */}
+          <Pressable
+            style={[styles.inviteButton, styles.inviteButtonDisabled]}
+            disabled
+          >
+            <Feather name="user-plus" size={16} color={colors.textMuted} />
+            <Text style={styles.inviteButtonTextDisabled}>Invite someone</Text>
+          </Pressable>
+        </View>
         {/* Leave/Delete section — added in Task 6 */}
       </ScrollView>
     </View>
@@ -247,4 +363,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.border,
   },
   retryText: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.primary },
+
+  inviteButton: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, marginTop: 12,
+    paddingVertical: 12, borderRadius: 12,
+    borderWidth: 1, borderColor: colors.primary,
+  },
+  inviteButtonDisabled: { borderColor: colors.border },
+  inviteButtonTextDisabled: { fontFamily: fonts.bodyBold, fontSize: 14, color: colors.textMuted },
 });
