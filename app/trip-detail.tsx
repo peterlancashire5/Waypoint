@@ -30,6 +30,12 @@ import AddStopSheet from '@/components/AddStopSheet';
 import type { PendingStop } from '@/components/AddStopSheet';
 import type { StopOption } from '@/components/BookingPreviewSheet';
 import type { ParsedBooking } from '@/lib/claude';
+import { useNetworkStatus } from '@/context/NetworkContext';
+import {
+  readTripCache,
+  writeTripCache,
+  updateLastOpenedAt,
+} from '@/lib/offlineCache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -95,6 +101,14 @@ interface EditableStop {
 interface CollaboratorProfile {
   id: string;
   email: string;
+}
+
+// Shape cached to disk for offline restore
+interface TripCacheData {
+  trip: any; // same shape as the `trip` state (raw Supabase row + sorted stops/legs)
+  itinerary: ItineraryItem[];
+  stopOptions: StopOption[];
+  collaboratorProfiles: CollaboratorProfile[];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -425,6 +439,8 @@ export default function TripDetailScreen() {
   // Collaborators (for avatar stack on shared trips)
   const [collaboratorProfiles, setCollaboratorProfiles] = useState<CollaboratorProfile[]>([]);
 
+  const { isOnline, onlineRefreshTrigger, showOfflineToast } = useNetworkStatus();
+
   // Toast
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastOpacity = useRef(new Animated.Value(0)).current;
@@ -441,6 +457,21 @@ export default function TripDetailScreen() {
 
     setLoading(true);
     setError(null);
+
+    // ── Offline fallback ─────────────────────────────────────────────────────
+    if (!isOnline) {
+      const cached = await readTripCache<TripCacheData>(tripId);
+      if (cached) {
+        setTrip(cached.trip);
+        setItinerary(cached.itinerary);
+        setStopOptions(cached.stopOptions);
+        setCollaboratorProfiles(cached.collaboratorProfiles);
+      } else {
+        setError('No saved data available.');
+      }
+      setLoading(false);
+      return;
+    }
 
     const { data: { session } } = await supabase.auth.getSession();
     const userId = session?.user?.id ?? null;
@@ -576,7 +607,8 @@ export default function TripDetailScreen() {
       } catch { /* skip malformed */ }
     }
 
-    setItinerary(buildItinerary(sortedStops, sortedLegs, allTransport));
+    const itineraryData = buildItinerary(sortedStops, sortedLegs, allTransport);
+    setItinerary(itineraryData);
 
     // Fetch collaborators for avatar stack (non-blocking)
     // trip_members stores only non-owner members; include owner via raw.owner_id
@@ -585,6 +617,7 @@ export default function TripDetailScreen() {
       .select('user_id')
       .eq('trip_id', tripId!);
 
+    let collaboratorProfilesData: CollaboratorProfile[] = [];
     if (memberRows && memberRows.length > 0) {
       // Shared trip — show owner + all members in the avatar stack
       const memberIds = memberRows.map((m: { user_id: string }) => m.user_id);
@@ -593,14 +626,30 @@ export default function TripDetailScreen() {
         .from('profiles')
         .select('id, email')
         .in('id', allUserIds);
-      setCollaboratorProfiles((profileRows ?? []) as CollaboratorProfile[]);
-    } else {
-      // Solo trip — no avatar stack
-      setCollaboratorProfiles([]);
+      collaboratorProfilesData = (profileRows ?? []) as CollaboratorProfile[];
     }
+    // Solo trip — collaboratorProfilesData stays []
+    setCollaboratorProfiles(collaboratorProfilesData);
+
+    // Update last-opened timestamp so cleanup knows this trip is active
+    updateLastOpenedAt(tripId).catch(() => {});
 
     setLoading(false);
-  }, [tripId]);
+
+    // Write full trip state to cache for offline use
+    writeTripCache(
+      tripId,
+      {
+        trip: { ...raw, stops: sortedStops, legs: sortedLegs },
+        itinerary: itineraryData,
+        stopOptions: sortedStops.map((s) => ({ id: s.id, city: s.city, tripName: raw.name ?? '' })),
+        collaboratorProfiles: collaboratorProfilesData,
+      } satisfies TripCacheData,
+      stopIds,
+    ).catch(() => {});
+
+    // TODO (Task 12): downloadDocumentsForTrip(tripId, supabase).catch(() => {});
+  }, [tripId, isOnline, onlineRefreshTrigger]);
 
   useFocusEffect(
     useCallback(() => {
@@ -1145,6 +1194,7 @@ export default function TripDetailScreen() {
                   <GapRow
                     item={item}
                     onAddTransport={() => {
+                      if (!isOnline) { showOfflineToast(); return; }
                       setActiveToStopId(item.toStopId);
                       setManualVisible(true);
                     }}
@@ -1167,7 +1217,10 @@ export default function TripDetailScreen() {
         <DraggableFlatList
           data={editStops}
           keyExtractor={(item) => item.tempId}
-          onDragEnd={({ data }) => setEditStops(data)}
+          onDragEnd={({ data }) => {
+            if (!isOnline) return;
+            setEditStops(data);
+          }}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           renderItem={({ item, drag, isActive, getIndex }: RenderItemParams<EditableStop>) => (
@@ -1177,7 +1230,10 @@ export default function TripDetailScreen() {
                 index={getIndex() ?? 0}
                 drag={drag}
                 isActive={isActive}
-                onDelete={() => handleDeleteStop(item)}
+                onDelete={() => {
+                  if (!isOnline) { showOfflineToast(); return; }
+                  handleDeleteStop(item);
+                }}
               />
             </ScaleDecorator>
           )}
@@ -1189,8 +1245,11 @@ export default function TripDetailScreen() {
           }
           ListFooterComponent={
             <Pressable
-              style={styles.addStopBtn}
-              onPress={() => setShowAddStop(true)}
+              style={[styles.addStopBtn, !isOnline && { opacity: 0.4 }]}
+              onPress={() => {
+                if (!isOnline) { showOfflineToast(); return; }
+                setShowAddStop(true);
+              }}
             >
               <Feather name="plus" size={16} color={colors.primary} />
               <Text style={styles.addStopText}>Add Stop</Text>
@@ -1212,6 +1271,7 @@ export default function TripDetailScreen() {
               style={styles.menuItem}
               onPress={() => {
                 setMenuVisible(false);
+                if (!isOnline) { showOfflineToast(); return; }
                 enterEditMode();
               }}
             >
