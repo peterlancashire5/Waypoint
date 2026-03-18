@@ -46,6 +46,10 @@ export default function Toast({
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // [] is intentional: Toast is rendered once per message instance. opacity and
+    // onDismiss are stable for the lifetime of this mount; capturing them at mount
+    // time is correct and prevents the timer from resetting on unrelated re-renders.
   }, []);
 
   function dismiss() {
@@ -63,7 +67,7 @@ export default function Toast({
   const positionStyle =
     position === 'top'
       ? { top: insets.top + 8 + topOffset }
-      : { bottom: 104 };
+      : { bottom: 104 }; // tab bar ~80px + 24px gap
 
   return (
     <Animated.View style={[styles.toast, positionStyle, { opacity }]}>

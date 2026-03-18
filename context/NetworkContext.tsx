@@ -52,7 +52,6 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
 
   // In-memory flags — reset on app launch, not persisted
   const hasShownOfflineToast = useRef(false);
-  const wasOnline = useRef(true);
   const toastCounter = useRef(0);
 
   // ── Network subscription ──────────────────────────────────────────────────
@@ -90,7 +89,6 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
         setOnlineRefreshTrigger((n) => n + 1);
       }
 
-      wasOnline.current = online;
       return online;
     });
   }

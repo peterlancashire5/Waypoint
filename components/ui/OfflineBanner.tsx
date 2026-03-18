@@ -47,7 +47,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: BANNER_HEIGHT,
-    backgroundColor: '#6B6460',
+    backgroundColor: '#6B6460', // intentionally outside the standard palette — neutral muted tone for system-level status
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
