@@ -14,6 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { File as FSFile } from 'expo-file-system';
+import { randomUUID } from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import { colors } from '@/constants/colors';
 import { fonts } from '@/constants/typography';
@@ -722,6 +723,9 @@ export default function QuickCaptureFAB() {
         }
       } catch (err: any) {
         Alert.alert('Could not save place', err?.message ?? 'Please try again.');
+      } finally {
+        setSourceFileUri(null);
+        setSourceMediaType(null);
       }
       return;
     }
@@ -1037,14 +1041,12 @@ export default function QuickCaptureFAB() {
         'image/png': 'png',
       };
       const fileType = fileTypeMap[mimeType] ?? 'jpg';
-      const storageExt = fileType === 'jpg' ? 'jpeg' : fileType;
-
       // Read file as ArrayBuffer using the new expo-file-system File API
       const fsFile = new FSFile(fileUri);
       const arrayBuffer = await fsFile.arrayBuffer();
 
       // Upload to Storage: documents/{userId}/{uuid}.{ext}
-      const storagePath = `${userId}/${crypto.randomUUID()}.${storageExt}`;
+      const storagePath = `${userId}/${randomUUID()}.${fileType === 'jpg' ? 'jpg' : fileType}`;
       const { error: uploadError } = await supabase.storage
         .from('documents')
         .upload(storagePath, arrayBuffer, {
