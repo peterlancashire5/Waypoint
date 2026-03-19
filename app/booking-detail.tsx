@@ -1088,7 +1088,6 @@ export default function BookingDetailScreen() {
 
   const [linkedDoc, setLinkedDoc] = useState<LinkedDocument | null>(null);
   const [loadingDoc, setLoadingDoc] = useState(false);
-  const [viewingDoc, setViewingDoc] = useState(false);
 
   // ── Fetch record ────────────────────────────────────────────────────────────
 
@@ -1109,6 +1108,7 @@ export default function BookingDetailScreen() {
             if (cached.accommodation) setAccommodation(cached.accommodation);
             if (cached.journeyDetail) setJourneyDetail(cached.journeyDetail);
             if (cached.savedItemTransport) setSavedItemTransport(cached.savedItemTransport);
+            if (cached.linkedDoc) setLinkedDoc(cached.linkedDoc);
           } else {
             setError('No saved data available.');
           }
@@ -1131,12 +1131,12 @@ export default function BookingDetailScreen() {
           console.log('[booking-detail] fetched accommodation:', JSON.stringify(data));
           const accomData = data as unknown as AccommodationRecord;
           setAccommodation(accomData);
+          const doc = await loadLinkedDocument('accommodation', accomData.id).catch(() => null);
           // Cache for offline — fire and forget
           AsyncStorage.setItem(
             `waypoint_cache_booking_${id}`,
-            JSON.stringify({ accommodation: accomData }),
+            JSON.stringify({ accommodation: accomData, linkedDoc: doc ?? undefined }),
           ).catch(() => {});
-          await loadLinkedDocument('accommodation', accomData.id).catch(() => {});
         }
       } else if (source === 'saved_items') {
         // Transport stored as JSON in saved_items.note
@@ -1180,12 +1180,12 @@ export default function BookingDetailScreen() {
               legs: parsed.is_connection ? parsed.legs : undefined,
             };
             setSavedItemTransport(transportData);
+            const doc = await loadLinkedDocument('saved_place', (data as any).id).catch(() => null);
             // Cache for offline — fire and forget
             AsyncStorage.setItem(
               `waypoint_cache_booking_${id}`,
-              JSON.stringify({ savedItemTransport: transportData }),
+              JSON.stringify({ savedItemTransport: transportData, linkedDoc: doc ?? undefined }),
             ).catch(() => {});
-            await loadLinkedDocument('saved_place', (data as any).id).catch(() => {});
           } catch {
             setError('Could not parse transport details.');
           }
@@ -1229,12 +1229,12 @@ export default function BookingDetailScreen() {
           primaryLbId: (lb as any).id,
         };
         setJourneyDetail(journeyData);
+        const doc = await loadLinkedDocument('leg_booking', (lb as any).id).catch(() => null);
         // Cache for offline — fire and forget
         AsyncStorage.setItem(
           `waypoint_cache_booking_${id}`,
-          JSON.stringify({ journeyDetail: journeyData }),
+          JSON.stringify({ journeyDetail: journeyData, linkedDoc: doc ?? undefined }),
         ).catch(() => {});
-        await loadLinkedDocument('leg_booking', (lb as any).id).catch(() => {});
       }
 
       setLoading(false);
@@ -1244,7 +1244,7 @@ export default function BookingDetailScreen() {
 
   // ── Linked document helpers ──────────────────────────────────────────────────
 
-  async function loadLinkedDocument(linkableType: string, linkableId: string): Promise<void> {
+  async function loadLinkedDocument(linkableType: string, linkableId: string): Promise<LinkedDocument | null> {
     try {
       const { data } = await supabase
         .from('document_links')
@@ -1254,24 +1254,26 @@ export default function BookingDetailScreen() {
         .limit(1)
         .maybeSingle();
 
-      if (!data) return;
+      if (!data) return null;
       const docFile = (data as any).document_files;
-      if (!docFile) return;
+      if (!docFile) return null;
 
-      setLinkedDoc({
+      const doc: LinkedDocument = {
         id: (data as any).document_id,
         storage_path: docFile.storage_path,
         original_filename: docFile.original_filename,
-      });
+      };
+      setLinkedDoc(doc);
+      return doc;
     } catch {
       // No linked doc — that's fine
+      return null;
     }
   }
 
   async function handleViewOriginal() {
-    if (!linkedDoc) return;
-    if (viewingDoc) return;
-    setViewingDoc(true);
+    if (!linkedDoc || loadingDoc) return;
+    setLoadingDoc(true);
     try {
       // Check local cache first
       let localPath = await getLocalDocumentPath(linkedDoc.id);
@@ -1282,14 +1284,12 @@ export default function BookingDetailScreen() {
           Alert.alert('Offline', 'This document is not available offline. Connect to the internet to download it.');
           return;
         }
-        setLoadingDoc(true);
         localPath = await downloadDocumentOnDemand(
           linkedDoc.id,
           linkedDoc.storage_path,
           linkedDoc.original_filename,
           supabase,
         );
-        setLoadingDoc(false);
       }
 
       if (!localPath) {
@@ -1303,7 +1303,6 @@ export default function BookingDetailScreen() {
       Alert.alert('Could not open document', e?.message ?? 'No app available to open this file type.');
     } finally {
       setLoadingDoc(false);
-      setViewingDoc(false);
     }
   }
 
@@ -1585,7 +1584,7 @@ export default function BookingDetailScreen() {
           <Pressable
             style={({ pressed }) => [styles.viewDocButton, pressed && styles.viewDocButtonPressed]}
             onPress={handleViewOriginal}
-            disabled={viewingDoc}
+            disabled={loadingDoc}
           >
             {loadingDoc ? (
               <ActivityIndicator size="small" color={colors.primary} />
