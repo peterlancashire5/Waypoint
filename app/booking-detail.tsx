@@ -21,6 +21,8 @@ import { deleteTransportBooking, deleteConnectionBooking } from '@/lib/journeyUt
 import { transportIcon } from '@/components/BookingPreviewSheet';
 import type { TransportType } from '@/lib/claude';
 import { useNetworkStatus } from '@/context/NetworkContext';
+import FileViewer from 'react-native-file-viewer';
+import { getLocalDocumentPath, downloadDocumentOnDemand } from '@/lib/documentCache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -130,6 +132,12 @@ interface SavedItemTransportRecord {
     seat: string | null;
     leg_order: number;
   }>;
+}
+
+interface LinkedDocument {
+  id: string;
+  storage_path: string;
+  original_filename: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1078,6 +1086,10 @@ export default function BookingDetailScreen() {
   const [journeyDetail, setJourneyDetail] = useState<JourneyDetail | null>(null);
   const [savedItemTransport, setSavedItemTransport] = useState<SavedItemTransportRecord | null>(null);
 
+  const [linkedDoc, setLinkedDoc] = useState<LinkedDocument | null>(null);
+  const [loadingDoc, setLoadingDoc] = useState(false);
+  const [viewingDoc, setViewingDoc] = useState(false);
+
   // ── Fetch record ────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1124,6 +1136,7 @@ export default function BookingDetailScreen() {
             `waypoint_cache_booking_${id}`,
             JSON.stringify({ accommodation: accomData }),
           ).catch(() => {});
+          await loadLinkedDocument('accommodation', accomData.id).catch(() => {});
         }
       } else if (source === 'saved_items') {
         // Transport stored as JSON in saved_items.note
@@ -1172,6 +1185,7 @@ export default function BookingDetailScreen() {
               `waypoint_cache_booking_${id}`,
               JSON.stringify({ savedItemTransport: transportData }),
             ).catch(() => {});
+            await loadLinkedDocument('saved_place', (data as any).id).catch(() => {});
           } catch {
             setError('Could not parse transport details.');
           }
@@ -1220,12 +1234,78 @@ export default function BookingDetailScreen() {
           `waypoint_cache_booking_${id}`,
           JSON.stringify({ journeyDetail: journeyData }),
         ).catch(() => {});
+        await loadLinkedDocument('leg_booking', (lb as any).id).catch(() => {});
       }
 
       setLoading(false);
     };
     load();
   }, [id, type, source, isOnline, onlineRefreshTrigger]);
+
+  // ── Linked document helpers ──────────────────────────────────────────────────
+
+  async function loadLinkedDocument(linkableType: string, linkableId: string): Promise<void> {
+    try {
+      const { data } = await supabase
+        .from('document_links')
+        .select('document_id, document_files:document_id(storage_path, original_filename)')
+        .eq('linkable_type', linkableType)
+        .eq('linkable_id', linkableId)
+        .limit(1)
+        .maybeSingle();
+
+      if (!data) return;
+      const docFile = (data as any).document_files;
+      if (!docFile) return;
+
+      setLinkedDoc({
+        id: (data as any).document_id,
+        storage_path: docFile.storage_path,
+        original_filename: docFile.original_filename,
+      });
+    } catch {
+      // No linked doc — that's fine
+    }
+  }
+
+  async function handleViewOriginal() {
+    if (!linkedDoc) return;
+    if (viewingDoc) return;
+    setViewingDoc(true);
+    try {
+      // Check local cache first
+      let localPath = await getLocalDocumentPath(linkedDoc.id);
+
+      // Not cached — download if online
+      if (!localPath) {
+        if (!isOnline) {
+          Alert.alert('Offline', 'This document is not available offline. Connect to the internet to download it.');
+          return;
+        }
+        setLoadingDoc(true);
+        localPath = await downloadDocumentOnDemand(
+          linkedDoc.id,
+          linkedDoc.storage_path,
+          linkedDoc.original_filename,
+          supabase,
+        );
+        setLoadingDoc(false);
+      }
+
+      if (!localPath) {
+        Alert.alert('Could not open document', 'The file could not be downloaded. Please try again.');
+        return;
+      }
+
+      await FileViewer.open(localPath, { showOpenWithDialog: true });
+    } catch (e: any) {
+      // FileViewer throws if no app can open the file
+      Alert.alert('Could not open document', e?.message ?? 'No app available to open this file type.');
+    } finally {
+      setLoadingDoc(false);
+      setViewingDoc(false);
+    }
+  }
 
   // ── Save a field ────────────────────────────────────────────────────────────
 
@@ -1501,8 +1581,22 @@ export default function BookingDetailScreen() {
               />
         )}
 
-        {/* TODO: PDF link — store pdf_uri in accommodation / leg_bookings / saved_items
-            and show an "Open original PDF" button here when it's available. */}
+        {linkedDoc && (
+          <Pressable
+            style={({ pressed }) => [styles.viewDocButton, pressed && styles.viewDocButtonPressed]}
+            onPress={handleViewOriginal}
+            disabled={viewingDoc}
+          >
+            {loadingDoc ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <>
+                <Feather name="file-text" size={16} color={colors.primary} />
+                <Text style={styles.viewDocButtonText}>View original document</Text>
+              </>
+            )}
+          </Pressable>
+        )}
 
         {/* Delete */}
         <View style={styles.deleteSection}>
@@ -1703,6 +1797,19 @@ const styles = StyleSheet.create({
   },
   deleteButtonPressed: { opacity: 0.7 },
   deleteButtonText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.error },
+
+  // View original document
+  viewDocButton: {
+    flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'center' as const,
+    gap: 8,
+    paddingVertical: 15,
+    borderRadius: 14,
+    borderWidth: 1, borderColor: colors.primary,
+    backgroundColor: colors.white,
+    marginTop: 12, marginBottom: 4,
+  },
+  viewDocButtonPressed: { opacity: 0.7 },
+  viewDocButtonText: { fontFamily: fonts.bodyBold, fontSize: 15, color: colors.primary },
 
   // Loading / error
   centred: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32 },
