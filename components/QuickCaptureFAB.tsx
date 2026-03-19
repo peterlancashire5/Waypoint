@@ -13,7 +13,6 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
-import { File as FSFile } from 'expo-file-system';
 import { randomUUID } from 'expo-crypto';
 import * as ImagePicker from 'expo-image-picker';
 import { colors } from '@/constants/colors';
@@ -473,8 +472,11 @@ export default function QuickCaptureFAB() {
   const [stopsLoaded, setStopsLoaded] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [lastSaved, setLastSaved] = useState<SavedRecord | null>(null);
-  const [sourceFileUri, setSourceFileUri] = useState<string | null>(null);
-  const [sourceMediaType, setSourceMediaType] = useState<string | null>(null);
+  // Use refs rather than state so that closures created in earlier renders
+  // (e.g. handleUploadFile captured by setTimeout inside SourcePickerSheet)
+  // always read the current value instead of the stale null from mount-time.
+  const sourceFileUriRef = useRef<string | null>(null);
+  const sourceMediaTypeRef = useRef<string | null>(null);
 
   // ── Load stops + leg gaps on mount ──────────────────────────────────────
   //
@@ -628,8 +630,8 @@ export default function QuickCaptureFAB() {
 
       const asset = result.assets[0];
       const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType);
-      setSourceFileUri(asset.uri);
-      setSourceMediaType(rawMediaType);
+      sourceFileUriRef.current = asset.uri;
+      sourceMediaTypeRef.current = rawMediaType;
       const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
@@ -658,8 +660,8 @@ export default function QuickCaptureFAB() {
 
       const asset = result.assets[0];
       const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
-      setSourceFileUri(asset.uri);
-      setSourceMediaType(rawMediaType);
+      sourceFileUriRef.current = asset.uri;
+      sourceMediaTypeRef.current = rawMediaType;
       const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
@@ -688,8 +690,8 @@ export default function QuickCaptureFAB() {
 
       const asset = result.assets[0];
       const rawMediaType = mediaTypeFromUri(asset.uri, asset.mimeType ?? undefined);
-      setSourceFileUri(asset.uri);
-      setSourceMediaType(rawMediaType);
+      sourceFileUriRef.current = asset.uri;
+      sourceMediaTypeRef.current = rawMediaType;
       const { base64, mediaType } = await readAndPrepareBase64(asset.uri, rawMediaType);
       const booking = await parseBookingFile(base64, mediaType);
       await handleParsed(booking);
@@ -724,8 +726,8 @@ export default function QuickCaptureFAB() {
       } catch (err: any) {
         Alert.alert('Could not save place', err?.message ?? 'Please try again.');
       } finally {
-        setSourceFileUri(null);
-        setSourceMediaType(null);
+        sourceFileUriRef.current = null;
+        sourceMediaTypeRef.current = null;
       }
       return;
     }
@@ -780,10 +782,10 @@ export default function QuickCaptureFAB() {
         const record = await saveBooking(booking, stop.id, session.user.id);
         if (record) {
           setLastSaved(record);
-          if (sourceFileUri && sourceMediaType) {
-            uploadSourceDocument(record, sourceFileUri, sourceMediaType, session.user.id, stop.tripId).catch(() => {});
-            setSourceFileUri(null);
-            setSourceMediaType(null);
+          if (sourceFileUriRef.current && sourceMediaTypeRef.current) {
+            uploadSourceDocument(record, sourceFileUriRef.current, sourceMediaTypeRef.current, session.user.id, stop.tripId).catch(() => {});
+            sourceFileUriRef.current = null;
+            sourceMediaTypeRef.current = null;
           }
         }
         setToastMessage(`Saved to ${stop.city}`);
@@ -895,10 +897,10 @@ export default function QuickCaptureFAB() {
 
       const savedRecord: SavedRecord = { table: 'journeys', id: journeyId };
       setLastSaved(savedRecord);
-      if (sourceFileUri && sourceMediaType) {
-        uploadSourceDocument(savedRecord, sourceFileUri, sourceMediaType, session.user.id, gap.tripId).catch(() => {});
-        setSourceFileUri(null);
-        setSourceMediaType(null);
+      if (sourceFileUriRef.current && sourceMediaTypeRef.current) {
+        uploadSourceDocument(savedRecord, sourceFileUriRef.current, sourceMediaTypeRef.current, session.user.id, gap.tripId).catch(() => {});
+        sourceFileUriRef.current = null;
+        sourceMediaTypeRef.current = null;
       }
       setToastMessage(`Started journey ${gap.fromCity} → ${gap.toCity}`);
     } catch (err: any) {
@@ -976,10 +978,10 @@ export default function QuickCaptureFAB() {
         meta: { journeyId: journey.id, wasComplete: false },
       };
       setLastSaved(savedRecord);
-      if (sourceFileUri && sourceMediaType) {
-        uploadSourceDocument(savedRecord, sourceFileUri, sourceMediaType, session.user.id, journey.tripId).catch(() => {});
-        setSourceFileUri(null);
-        setSourceMediaType(null);
+      if (sourceFileUriRef.current && sourceMediaTypeRef.current) {
+        uploadSourceDocument(savedRecord, sourceFileUriRef.current, sourceMediaTypeRef.current, session.user.id, journey.tripId).catch(() => {});
+        sourceFileUriRef.current = null;
+        sourceMediaTypeRef.current = null;
       }
       setToastMessage(toastText);
     } catch (err: any) {
@@ -1007,11 +1009,11 @@ export default function QuickCaptureFAB() {
       const record = await saveBooking(booking, stopId, session.user.id, savedGap?.tripId ?? null);
       setPreviewVisible(false);
       setParsedBooking(null);
-      if (record && sourceFileUri && sourceMediaType) {
+      if (record && sourceFileUriRef.current && sourceMediaTypeRef.current) {
         const tripId = savedGap?.tripId ?? allStops.find((s) => s.id === stopId)?.tripId ?? null;
-        uploadSourceDocument(record, sourceFileUri, sourceMediaType, session.user.id, tripId).catch(() => {});
-        setSourceFileUri(null);
-        setSourceMediaType(null);
+        uploadSourceDocument(record, sourceFileUriRef.current, sourceMediaTypeRef.current, session.user.id, tripId).catch(() => {});
+        sourceFileUriRef.current = null;
+        sourceMediaTypeRef.current = null;
       }
       const savedStop = allStops.find((s) => s.id === stopId);
       if (savedGap) setToastMessage(`Saved ${savedGap.fromCity} → ${savedGap.toCity}`);
@@ -1041,22 +1043,30 @@ export default function QuickCaptureFAB() {
         'image/png': 'png',
       };
       const fileType = fileTypeMap[mimeType] ?? 'jpg';
-      // Read file as ArrayBuffer using the new expo-file-system File API
-      const fsFile = new FSFile(fileUri);
-      const arrayBuffer = await fsFile.arrayBuffer();
+
+      // Read file via fetch — handles file://, ph://, and other URI schemes
+      // reliably in React Native / Hermes across all capture paths.
+      // Use arrayBuffer → Uint8Array, NOT blob(): React Native Blob objects are
+      // not correctly serialised by the Supabase storage client (0-byte uploads).
+      const response = await fetch(fileUri);
+      const uint8Array = new Uint8Array(await response.arrayBuffer());
+      console.log('[uploadSourceDocument] bytes before upload:', uint8Array.byteLength);
 
       // Upload to Storage: documents/{userId}/{uuid}.{ext}
-      const storagePath = `${userId}/${randomUUID()}.${fileType === 'jpg' ? 'jpg' : fileType}`;
+      const storagePath = `${userId}/${randomUUID()}.${fileType}`;
       const { error: uploadError } = await supabase.storage
         .from('documents')
-        .upload(storagePath, arrayBuffer, {
+        .upload(storagePath, uint8Array, {
           contentType: mimeType,
           upsert: false,
         });
-      if (uploadError) return;
+      if (uploadError) {
+        console.error('[uploadSourceDocument] Storage upload failed:', uploadError);
+        return;
+      }
 
       // Insert document_files row
-      const originalFilename = `document.${fileType === 'jpg' ? 'jpg' : fileType}`;
+      const originalFilename = `document.${fileType}`;
       const { data: docFile, error: docError } = await supabase
         .from('document_files')
         .insert({
@@ -1068,7 +1078,10 @@ export default function QuickCaptureFAB() {
         })
         .select('id')
         .single();
-      if (docError || !docFile) return;
+      if (docError || !docFile) {
+        console.error('[uploadSourceDocument] document_files insert failed:', docError);
+        return;
+      }
 
       // Insert document_links row (only for linkable types)
       const linkableTypeMap: Partial<Record<SavedRecord['table'], string>> = {
@@ -1080,14 +1093,17 @@ export default function QuickCaptureFAB() {
       };
       const linkableType = linkableTypeMap[record.table];
       if (linkableType) {
-        await supabase.from('document_links').insert({
+        const { error: linkError } = await supabase.from('document_links').insert({
           document_id: (docFile as any).id,
           linkable_type: linkableType,
           linkable_id: record.id,
         });
+        if (linkError) {
+          console.error('[uploadSourceDocument] document_links insert failed:', linkError);
+        }
       }
     } catch (e) {
-      console.warn('[QuickCaptureFAB] uploadSourceDocument failed:', e);
+      console.error('[uploadSourceDocument] unexpected error:', e);
     }
   }
 
@@ -1141,7 +1157,7 @@ export default function QuickCaptureFAB() {
         legGaps={allLegGaps}
         saving={saving}
         onSave={handleManualSave}
-        onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); setSourceFileUri(null); setSourceMediaType(null); }}
+        onDiscard={() => { setPreviewVisible(false); setParsedBooking(null); sourceFileUriRef.current = null; sourceMediaTypeRef.current = null; }}
       />
 
       {/* Toast */}

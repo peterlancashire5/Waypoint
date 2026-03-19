@@ -17,15 +17,19 @@ interface OfflineBannerProps {
 
 export default function OfflineBanner({ visible }: OfflineBannerProps) {
   const insets = useSafeAreaInsets();
-  const translateY = useRef(new Animated.Value(-BANNER_HEIGHT)).current;
+  // Initialise well above the screen so there's no flash on mount.
+  const translateY = useRef(new Animated.Value(-(BANNER_HEIGHT + 100))).current;
 
   useEffect(() => {
+    // Hidden offset must exceed the full top-inset so the banner parks completely
+    // above the screen rather than peeking below the Dynamic Island notch.
+    const hiddenOffset = -(BANNER_HEIGHT + insets.top);
     Animated.timing(translateY, {
-      toValue: visible ? 0 : -BANNER_HEIGHT,
+      toValue: visible ? 0 : hiddenOffset,
       duration: 260,
       useNativeDriver: true,
     }).start();
-  }, [visible]);
+  }, [visible, insets.top]);
 
   return (
     <Animated.View

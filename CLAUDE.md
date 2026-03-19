@@ -4,6 +4,60 @@ Project context for Claude Code. Read this before starting any task.
 
 ---
 
+## Current Priorities & Known Issues
+
+**Active bugs:**
+- Journey detail screen only shows first leg (should show all legs)
+- Ljubljana (stop 2 on Euro Summer trip) not appearing as map pin — geocoding issue
+- DocumentPicker tap-to-select not working in iOS simulator (likely Expo DocumentPicker known issue)
+
+**Features to build next:**
+1. Booking status markers — confirmed, pending, not yet booked. Visual indicators on trip detail and stop detail screens.
+2. iOS share extension — PRD done. Needs paid Apple Developer account first.
+3. Trip collaboration — PRD done. Need to discuss UI layout (share/invite buttons, collaborator list, comments). Open question: should collaborator removal be creator-only?
+
+**Deferred (needs discussion before building):**
+4. Original document access — everywhere a document populates data, user should be able to view the original PDF/screenshot from within the app. Ideally offline.
+5. "Add a field" for missing data — accommodation detail screen should let users manually add fields the parser didn't extract, instead of showing empty rows.
+6. Settings toggle — show/hide saved place pins on home map. Build when settings screen is fleshed out.
+7. Security, infrastructure, scaling discussion — API key exposure, Supabase RLS, error recovery, rate limits, cost at scale. Must happen before launch.
+
+**Design polish (after features are complete):**
+8. Saved places map pins — category icons, pin styling, callout design
+9. General design polish pass
+
+**Other:**
+10. Buy domain — get-waypoint.com ($10.46 on Namecheap/Cloudflare). Not yet purchased.
+
+---
+
+## Claude Code Tooling
+
+**Skills (user scope):**
+- `claude-code-setup` — codebase analysis and automation recommendations
+- `skill-creator` — create and test custom skills
+- `frontend-design` — distinctive, non-generic UI output
+- `superpowers` — structured dev workflow: brainstorm → plan → TDD → execute → review
+
+**MCP servers (user scope):**
+- `context7` — live, version-specific library docs. Add "use context7" to prompts for current APIs
+- `supabase` — direct access to Waypoint's Supabase project (schema, queries, auth, storage)
+- `github` — repo management, issues, PRs, code search (repo: peterlancashire5/Waypoint)
+
+Use context7 when writing code that touches Expo, React Native, or Supabase APIs. Use the Supabase MCP to verify schema before writing queries.
+
+---
+
+## Workflow Preferences
+
+- **Explain before acting.** Before making changes, explain what you plan to do and why.
+- **Present options.** When there are multiple valid approaches, lay out the tradeoffs and let me choose. Don't assume.
+- **I'm learning.** I'm experienced with the product vision but newer to development — be explicit about technical decisions.
+- **Use superpowers for complex features.** For new features or multi-file changes, use the brainstorm → plan → execute workflow. For small fixes, just do them.
+- **Planning happens in Claude.ai.** Feature design and strategy discussions happen in the Claude.ai chatbot. Claude Code receives implementation briefs from those conversations.
+
+---
+
 ## What is Waypoint
 
 A travel companion app built with React Native / Expo. Users plan and organise trips: stops (cities), legs (transport between stops), accommodation, tickets, saved places, and day-by-day itineraries. The aesthetic is warm editorial — a premium travel magazine in app form.
@@ -53,8 +107,10 @@ Fonts loaded via `@expo-google-fonts/playfair-display` and `@expo-google-fonts/l
 ```
 app/
   _layout.tsx              Root stack: font loading, auth listener, routing guard
+  booking-detail.tsx       Booking detail screen
   create-trip.tsx          Modal — create a new trip (stack, slides up)
   leg.tsx                  Modal — leg detail / booking (stack, slides up)
+  place-detail.tsx         Place detail screen
   settings.tsx             Account screen — email display + sign out
   stop-detail.tsx          Stop detail screen (real screen, stack push)
   stop.tsx                 Inert placeholder — DO NOT use. Real screen is stop-detail.tsx
@@ -71,6 +127,18 @@ app/
     inbox.tsx              Inbox / saved items screen
     stop.tsx               Inert placeholder tab (href: null) — never navigate here
 
+components/
+  AddStopSheet.tsx         Modal sheet for adding a new stop (city + optional dates) to a trip
+  BookingPreviewSheet.tsx  Bottom sheet showing AI-parsed booking details with stop/leg assignment picker and save/discard actions
+  CityAutocomplete.tsx     City search with autocomplete suggestions
+  ManualAccommodationSheet.tsx   Manual accommodation entry form
+  ManualTransportSheet.tsx       Manual transport/leg creation form
+  PlaceDetailSheet.tsx     Bottom sheet for viewing, editing, moving, and deleting a saved place (with map preview)
+  QuickCaptureFAB.tsx      Floating action button for quick item capture
+  auth/SocialButton.tsx    Apple / Google sign-in buttons
+  ui/Button.tsx            Primary / secondary / ghost / dark variants + loading state
+  ui/Divider.tsx           Labelled horizontal divider
+
 constants/
   colors.ts                All design tokens
   typography.ts            Font family names + textStyle presets
@@ -80,13 +148,15 @@ hooks/
                            signInWithGoogle, signOut
 
 lib/
+  claude.ts                Anthropic API client — parses PDFs/images into typed booking or place structs via claude-opus-4-6
+  duplicateCheck.ts        Checks a parsed booking against existing Supabase records to detect duplicates before saving
+  inboxCount.ts            Inbox item count utility
+  journeyUtils.ts          Multi-leg journey helpers
+  placesEnrichment.ts      Queries Google Places Text Search API to resolve a place name into address, coords, and category
+  savedPlaceUtils.ts       Saved places utilities
   supabase.ts              Supabase client — SecureStore session adapter
                            Project URL: bvrgvzxerdefiklgtclw.supabase.co
-
-components/
-  auth/SocialButton.tsx    Apple / Google sign-in buttons
-  ui/Button.tsx            Primary / secondary / ghost / dark variants + loading state
-  ui/Divider.tsx           Labelled horizontal divider
+  tripStore.ts             Lightweight in-memory store for newly created trips within a session (not persisted)
 
 supabase/migrations/
   001_initial_schema.sql   Full schema — apply via Supabase SQL Editor
@@ -99,7 +169,7 @@ supabase/migrations/
 Expo Router 4 with a root Stack. Key points:
 
 - **Route groups are transparent** — `app/(main)/foo.tsx` has URL `/foo`, not `/(main)/foo`. Never use the group name in `pathname`.
-- **Stack screens for detail/modal views** — registered explicitly in `app/_layout.tsx`. Currently: `leg` (modal), `create-trip` (modal), `stop-detail`, `trip-detail`, `settings`.
+- **Stack screens for detail/modal views** — registered explicitly in `app/_layout.tsx`. Currently: `leg` (modal), `create-trip` (modal), `stop-detail`, `trip-detail`, `booking-detail`, `place-detail`, `settings`.
 - **Tab screens** must NOT be used for screens that need route params. Tab push doesn't pass params reliably. Detail screens must live at the root stack level.
 - **`app/(main)/stop.tsx`** is an inert placeholder (`<View />`). It exists because Expo Router auto-detects all files as routes but must never be navigated to. The real stop screen is `app/stop-detail.tsx`.
 - **Navigation from home to stop:** `router.push({ pathname: '/stop-detail', params: { stopId } })`
@@ -238,19 +308,45 @@ All methods throw on error — callers must `try/catch`. Apple sign-in error cod
 - [x] Create trip flow (single + multi-stop, with geocoding)
 - [x] Trips list screen
 - [x] Trip detail screen (itinerary spine: stops + legs interleaved)
-- [x] Stop detail screen (header with real data; tab content placeholder)
+- [x] Stop detail screen (header with real data; tab content)
+- [x] Stop editing
 - [x] Leg modal (real transport + booking data; empty state)
-- [x] Inbox screen (mock items; filing bottom sheet)
+- [x] Inbox screen (with inbox count utility)
 - [x] Settings screen (email + sign out)
 - [x] Full Supabase schema + RLS policies
+- [x] Multi-leg journey support (journeyUtils)
+- [x] Manual transport/leg creation (ManualTransportSheet)
+- [x] Manual accommodation entry (ManualAccommodationSheet)
+- [x] Accommodation format expansion
+- [x] City autocomplete (CityAutocomplete component)
+- [x] Saved places utilities
+- [x] Saved places as map pins
+- [x] Place detail screen + sheet
+- [x] Booking detail screen + preview sheet
+- [x] Quick capture FAB
+- [x] PDF upload / AI document parsing (lib/claude.ts)
+- [x] Duplicate detection (lib/duplicateCheck.ts)
+- [x] Places enrichment (lib/placesEnrichment.ts)
 
 ## What's Not Built Yet
 
-- [ ] Stop detail tab content (Logistics: accommodation; Days: events timeline; Saved: saved places)
-- [ ] Add transport / create leg flow
-- [ ] Accommodation entry
+**Bugs to fix:**
+- [ ] Journey detail screen (only shows first leg)
+- [ ] Ljubljana geocoding pin issue
+- [ ] DocumentPicker tap-to-select (iOS simulator)
+
+**Features:**
+- [ ] Booking status markers (confirmed / pending / not yet booked)
+- [ ] iOS share extension (PRD done, needs paid Apple Developer account)
+- [ ] Trip collaboration (PRD done, UI layout discussion needed)
+- [ ] Original document access (view source PDF/screenshot in-app)
+- [ ] "Add a field" for accommodation (manual fields parser missed)
+- [ ] Settings toggle for saved place map pins
 - [ ] Events / day planner
-- [ ] Trip sharing / invite members
-- [ ] Saved items (real data)
 - [ ] Forgot password flow
 - [ ] Push notifications
+
+**Pre-launch:**
+- [ ] Security / infrastructure / scaling review
+- [ ] Design polish pass
+- [ ] Buy domain (get-waypoint.com)

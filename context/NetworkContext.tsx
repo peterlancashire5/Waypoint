@@ -70,9 +70,12 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   function handleNetworkChange(state: NetInfoState) {
-    // Consider online only when connected AND internet is reachable (or unknown/null = assume reachable)
+    // Consider online only when connected AND internet is reachable.
+    // Treat null as "assume ok" for both fields — NetInfo returns null briefly
+    // during initialisation (especially in the iOS Simulator), and a strict
+    // === true check would incorrectly mark the device as offline at startup.
     const online =
-      state.isConnected === true && state.isInternetReachable !== false;
+      state.isConnected !== false && state.isInternetReachable !== false;
 
     setIsOnline((prev) => {
       if (prev === online) return prev;

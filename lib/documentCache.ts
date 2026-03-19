@@ -7,15 +7,54 @@
 //   Value: { [documentId]: absoluteLocalPath }
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as FileSystem from 'expo-file-system';
+import { File, Directory, Paths } from 'expo-file-system';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 const DOC_CACHE_MAP_KEY = 'waypoint_doc_cache_map';
-const DOC_DIR = FileSystem.documentDirectory + 'waypoint_docs/';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type DocCacheMap = Record<string, string>; // documentId → local absolute path
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the waypoint_docs Directory, creating it if it doesn't exist yet.
+ * Directory.create() and Directory.exists are synchronous in the new API.
+ */
+function ensureDocDir(): Directory {
+  const dir = new Directory(Paths.document, 'waypoint_docs');
+  if (!dir.exists) {
+    dir.create();
+  }
+  return dir;
+}
+
+/**
+ * Downloads a signed URL to a local File and returns the File.
+ * Logs diagnostics so empty-body or error responses are immediately visible.
+ * Uses fetch → arrayBuffer → file.write() rather than File.downloadFileAsync
+ * because Supabase signed URLs can involve redirects that downloadFileAsync
+ * doesn't handle reliably, resulting in zero-byte files.
+ */
+async function fetchAndWrite(signedUrl: string, localFile: File): Promise<void> {
+  const response = await fetch(signedUrl);
+  console.log('[documentCache] download response:', response.status, response.statusText);
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`);
+  }
+
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  console.log('[documentCache] bytes received:', bytes.byteLength);
+
+  if (bytes.byteLength === 0) {
+    throw new Error('Server returned an empty body');
+  }
+
+  // write() creates the file if it does not exist, or overwrites it.
+  localFile.write(bytes);
+}
 
 // ─── Map helpers ──────────────────────────────────────────────────────────────
 
@@ -45,9 +84,9 @@ export async function getLocalDocumentPath(documentId: string): Promise<string |
   const map = await readMap();
   const path = map[documentId];
   if (!path) return null;
-  // Verify the file still exists (could have been cleared by OS)
-  const info = await FileSystem.getInfoAsync(path);
-  return info.exists ? path : null;
+  // Verify the file still exists (could have been cleared by OS).
+  // File.exists is a synchronous boolean property in the new API.
+  return new File(path).exists ? path : null;
 }
 
 /**
@@ -59,11 +98,7 @@ export async function downloadDocumentsForTrip(
   supabase: SupabaseClient,
 ): Promise<void> {
   try {
-    // Ensure the docs directory exists
-    const dirInfo = await FileSystem.getInfoAsync(DOC_DIR);
-    if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(DOC_DIR, { intermediates: true });
-    }
+    const docDir = ensureDocDir();
 
     // Fetch all document_files for this trip
     const { data: docFiles, error } = await supabase
@@ -78,10 +113,7 @@ export async function downloadDocumentsForTrip(
 
     for (const doc of docFiles) {
       // Skip if already cached and file still exists
-      if (map[doc.id]) {
-        const info = await FileSystem.getInfoAsync(map[doc.id]);
-        if (info.exists) continue;
-      }
+      if (map[doc.id] && new File(map[doc.id]).exists) continue;
 
       // Get a signed URL (1 hour expiry — enough for a background download)
       const { data: signedData } = await supabase.storage
@@ -90,10 +122,12 @@ export async function downloadDocumentsForTrip(
 
       if (!signedData?.signedUrl) continue;
 
-      const localPath = DOC_DIR + `${doc.id}_${doc.original_filename}`;
       try {
-        await FileSystem.downloadAsync(signedData.signedUrl, localPath);
-        map[doc.id] = localPath;
+        // Name the local file with the correct extension so file viewers
+        // (Quick Look, etc.) can open it without a "no app" error.
+        const localFile = new File(docDir, `${doc.id}.${doc.file_type}`);
+        await fetchAndWrite(signedData.signedUrl, localFile);
+        map[doc.id] = localFile.uri;
         updated = true;
       } catch (downloadErr) {
         console.warn(`[documentCache] Failed to download ${doc.id}:`, downloadErr);
@@ -117,27 +151,33 @@ export async function downloadDocumentOnDemand(
   supabase: SupabaseClient,
 ): Promise<string | null> {
   try {
-    const dirInfo = await FileSystem.getInfoAsync(DOC_DIR);
-    if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(DOC_DIR, { intermediates: true });
-    }
+    const docDir = ensureDocDir();
 
     const { data: signedData } = await supabase.storage
       .from('documents')
       .createSignedUrl(storagePath, 3600);
 
-    if (!signedData?.signedUrl) return null;
+    if (!signedData?.signedUrl) {
+      console.error('[documentCache] createSignedUrl returned no URL for path:', storagePath);
+      return null;
+    }
 
-    const localPath = DOC_DIR + `${documentId}_${originalFilename}`;
-    await FileSystem.downloadAsync(signedData.signedUrl, localPath);
+    console.log('[documentCache] signed URL generated for:', storagePath);
+
+    // Derive extension from the storage path (e.g. 'userId/uuid.pdf' → 'pdf').
+    // This ensures Quick Look receives a file with the correct extension.
+    const ext = storagePath.split('.').pop() ?? 'pdf';
+    const localFile = new File(docDir, `${documentId}.${ext}`);
+
+    await fetchAndWrite(signedData.signedUrl, localFile);
 
     const map = await readMap();
-    map[documentId] = localPath;
+    map[documentId] = localFile.uri;
     await writeMap(map);
 
-    return localPath;
+    return localFile.uri;
   } catch (e) {
-    console.warn('[documentCache] downloadDocumentOnDemand failed:', e);
+    console.error('[documentCache] downloadDocumentOnDemand failed:', e);
     return null;
   }
 }
